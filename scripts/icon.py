@@ -1,38 +1,40 @@
-"""Render the Framely-style tint mark for the repository and plugin package."""
+"""Render the UI color-wheel mark for the repository and plugin package."""
 import math
 import pathlib
+import re
 import struct
 import zlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SIZE = 256
-SAMPLES = 4
-BACKGROUND = (44, 48, 54)
-FOREGROUND = (220, 226, 232)
-
-
-def pixel(x, y):
-    # Rounded tile and the same circle, axes and arc used by src/ui.tsx.
-    corner_x, corner_y = max(abs(x - 128) - 88, 0), max(abs(y - 128) - 88, 0)
-    if math.hypot(corner_x, corner_y) > 24:
-        return (0, 0, 0, 0)
-    dx, dy = x - 128, y - 128
-    circle = abs(math.hypot(dx, dy) - 81) <= 7.2
-    axes = (abs(dx) <= 7.2 and abs(dy) <= 81) or (abs(dy) <= 7.2 and abs(dx) <= 81)
-    # Radius 135, endpoints at (128, 47) and (128, 209).
-    arc = dx >= 0 and abs(dy) <= 81 and abs(math.hypot(dx + 108, dy) - 135) <= 7.2
-    return (*FOREGROUND, 255) if circle or axes or arc else (*BACKGROUND, 255)
-
-
+style = (ROOT / 'src/style.css').read_text()
+wheel = re.search(r'\.color-wheel\{([^}]+)\}', style).group(1)
+gradient = re.search(r'conic-gradient\(([^)]+)\)', wheel).group(1)
+colors = [tuple(bytes.fromhex(value.strip().lstrip('#'))) for value in gradient.split(',')]
+shadow = re.search(r'box-shadow:inset 0 0 0 (\d+)px #([0-9a-f]{6})([0-9a-f]{2})', wheel)
+shadow_color = tuple(bytes.fromhex(shadow.group(2)))
+shadow_alpha = int(shadow.group(3), 16) / 255
+ui_width = int(re.search(r'width:(\d+)px', wheel).group(1))
+size = 256
+radius = 108
+inset = int(shadow.group(1)) / ui_width * radius * 2
+center = (size - 1) / 2
 rows = []
-for y in range(SIZE):
+for y in range(size):
     row = bytearray()
-    for x in range(SIZE):
-        samples = [pixel(x + (sx + .5) / SAMPLES, y + (sy + .5) / SAMPLES)
-                   for sy in range(SAMPLES) for sx in range(SAMPLES)]
-        alpha = sum(p[3] for p in samples)
-        rgb = [round(sum(p[c] * p[3] for p in samples) / alpha) if alpha else 0 for c in range(3)]
-        row.extend([*rgb, round(alpha / len(samples))])
+    for x in range(size):
+        dx, dy = x - center, y - center
+        distance = math.hypot(dx, dy)
+        alpha = min(1, max(0, radius + .5 - distance))
+        angle = (math.atan2(dx, -dy) / (2 * math.pi)) % 1
+        position = angle * (len(colors) - 1)
+        index = min(int(position), len(colors) - 2)
+        fraction = position - index
+        rgb = [a + (b - a) * fraction for a, b in zip(colors[index], colors[index + 1])]
+        if distance >= radius - inset:
+            rgb = [value * (1 - shadow_alpha) + tint * shadow_alpha for value, tint in zip(rgb, shadow_color)]
+        if alpha == 0:
+            rgb = [0, 0, 0]
+        row.extend([round(value) for value in rgb] + [round(alpha * 255)])
     rows.append(b'\0' + row)
 
 
@@ -40,10 +42,10 @@ def chunk(kind, data):
     return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
 
 
-image = (b'\x89PNG\r\n\x1a\n' +
-         chunk(b'IHDR', struct.pack('>IIBBBBB', SIZE, SIZE, 8, 6, 0, 0, 0)) +
-         chunk(b'IDAT', zlib.compress(b''.join(rows), 9)) + chunk(b'IEND', b''))
 output = ROOT / 'payload/icon.png'
 output.parent.mkdir(exist_ok=True)
+image = (b'\x89PNG\r\n\x1a\n' +
+    chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0)) +
+    chunk(b'IDAT', zlib.compress(b''.join(rows), 9)) + chunk(b'IEND', b''))
 (ROOT / 'icon.png').write_bytes(image)
 output.write_bytes(image)
