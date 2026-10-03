@@ -1,0 +1,9 @@
+node_modules/
+payload/
+dist/
+native/build/
+__pycache__/
+*.py[cod]
+*.key
+*.framely
+.env

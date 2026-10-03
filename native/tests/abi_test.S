@@ -1,0 +1,100 @@
+.text
+.p2align 2
+.global frame_sv_abi_test
+.type frame_sv_abi_test,%function
+/* args: interface, buffer, uniform, node, original upload function, entry path.
+ * Tests the real entry and C wrapper on native AArch64.
+ */
+frame_sv_abi_test:
+    stp x29,x30,[sp,#-176]!
+    stp x19,x20,[sp,#16]
+    stp x21,x22,[sp,#32]
+    stp x23,x24,[sp,#48]
+    stp x25,x26,[sp,#64]
+    stp x27,x28,[sp,#80]
+    stp d8,d9,[sp,#96]
+    stp d10,d11,[sp,#112]
+    stp d12,d13,[sp,#128]
+    stp d14,d15,[sp,#144]
+    str x3,[sp,#160]
+    mov x9,sp
+    str x9,[sp,#168]
+    mov x19,#19
+    mov x20,#20
+    mov x21,#21
+    mov x22,#22
+    mov x23,#23
+    mov x24,#24
+    mov x25,#25
+    mov x26,#26
+    mov x27,x3
+    mov x28,#28
+    mov x29,#29
+    mov x7,x4
+    fmov d8,#1.0
+    fmov d9,#1.0
+    fmov d10,#1.0
+    fmov d11,#1.0
+    fmov d12,#1.0
+    fmov d13,#1.0
+    fmov d14,#1.0
+    fmov d15,#1.0
+    blr x5
+    cmp x19,#19
+    ccmp x20,#20,#0,eq
+    ccmp x21,#21,#0,eq
+    ccmp x22,#22,#0,eq
+    ccmp x23,#23,#0,eq
+    ccmp x24,#24,#0,eq
+    ccmp x25,#25,#0,eq
+    ccmp x26,#26,#0,eq
+    ccmp x28,#28,#0,eq
+    ccmp x29,#29,#0,eq
+    cset w0,ne
+    ldr x9,[sp,#160]
+    cmp x27,x9
+    cset w10,ne
+    orr w0,w0,w10
+    mov x9,sp
+    ldr x10,[sp,#168]
+    cmp x9,x10
+    cset w10,ne
+    orr w0,w0,w10
+    fmov d0,#1.0
+    fcmp d8,d0
+    cset w9,ne
+    orr w0,w0,w9
+    fcmp d9,d0
+    cset w9,ne
+    orr w0,w0,w9
+    fcmp d10,d0
+    cset w9,ne
+    orr w0,w0,w9
+    fcmp d11,d0
+    cset w9,ne
+    orr w0,w0,w9
+    fcmp d12,d0
+    cset w9,ne
+    orr w0,w0,w9
+    fcmp d13,d0
+    cset w9,ne
+    orr w0,w0,w9
+    fcmp d14,d0
+    cset w9,ne
+    orr w0,w0,w9
+    fcmp d15,d0
+    cset w9,ne
+    orr w0,w0,w9
+    ldp x19,x20,[sp,#16]
+    ldp x21,x22,[sp,#32]
+    ldp x23,x24,[sp,#48]
+    ldp x25,x26,[sp,#64]
+    ldp x27,x28,[sp,#80]
+    ldp d8,d9,[sp,#96]
+    ldp d10,d11,[sp,#112]
+    ldp d12,d13,[sp,#128]
+    ldp d14,d15,[sp,#144]
+    ldp x29,x30,[sp],#176
+    ret
+.size frame_sv_abi_test,.-frame_sv_abi_test
+.section .note.GNU-stack,"",%progbits

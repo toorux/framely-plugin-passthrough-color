@@ -1,0 +1,38 @@
+// Integration test only: render the real manager and exercise its iframe bridge.
+#include "include/capi/cef_app_capi.h"
+#include "include/capi/cef_client_capi.h"
+#include "include/cef_api_hash.h"
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <thread>
+template<class T> struct Handler {
+ T api{};std::atomic<int> refs{1};
+ Handler(){api.base.size=sizeof(T);api.base.add_ref=[](cef_base_ref_counted_t* p){++reinterpret_cast<Handler*>(p)->refs;};api.base.release=[](cef_base_ref_counted_t* p){--reinterpret_cast<Handler*>(p)->refs;return 0;};api.base.has_one_ref=[](cef_base_ref_counted_t* p){return int(reinterpret_cast<Handler*>(p)->refs==1);};api.base.has_at_least_one_ref=[](cef_base_ref_counted_t* p){return int(reinterpret_cast<Handler*>(p)->refs>0);};}
+ T* acquire(){api.base.add_ref(&api.base);return &api;}
+};
+static Handler<cef_client_t> client;
+static Handler<cef_render_handler_t> render;
+static Handler<cef_display_handler_t> display;
+static Handler<cef_life_span_handler_t> life;
+static std::vector<unsigned char> pixels;static int pixel_width=0,pixel_height=0;
+static void snapshot(const std::string& name){const char* dir=std::getenv("FRAMELY_PREVIEW_DIR");if(!dir||pixels.empty())return;std::ofstream out(std::string(dir)+"/"+name+".ppm",std::ios::binary);out<<"P6\n"<<pixel_width<<" "<<pixel_height<<"\n255\n";for(size_t i=0;i<pixels.size();i+=4){unsigned char rgb[]={pixels[i+2],pixels[i+1],pixels[i]};out.write(reinterpret_cast<char*>(rgb),3);}}
+static bool ready=false,passed=false,failed=false,closed=false;static int paints=0;
+static void str(cef_string_t& s,const std::string& v){cef_string_utf8_to_utf16(v.data(),v.size(),&s);}
+static std::string text(const cef_string_t* s){cef_string_utf8_t o{};cef_string_utf16_to_utf8(s->str,s->length,&o);std::string r(o.str,o.length);cef_string_utf8_clear(&o);return r;}
+int main(int argc,char** argv){
+ std::cout.setf(std::ios::unitbuf);std::string url=argc>1?argv[1]:"",runtime=argc>2?argv[2]:"",cef=std::getenv("FRAMELY_CEF_ROOT")?std::getenv("FRAMELY_CEF_ROOT"):"";
+ cef_main_args_t args{argc,argv};if(std::strcmp(cef_api_hash(CEF_API_VERSION,0),CEF_API_HASH_PLATFORM))return 2;int child=cef_execute_process(&args,nullptr,nullptr);if(child>=0)return child;if(url.empty()||runtime.empty()||cef.empty())return 2;
+ cef_settings_t settings{};settings.size=sizeof(settings);settings.windowless_rendering_enabled=1;str(settings.root_cache_path,runtime+"/cache");str(settings.log_file,runtime+"/cef.log");str(settings.resources_dir_path,cef+"/Resources");str(settings.locales_dir_path,cef+"/Resources/locales");
+ if(!cef_initialize(&args,&settings,nullptr,nullptr))return 3;
+ render.api.get_view_rect=[](cef_render_handler_t*,cef_browser_t*,cef_rect_t* r){*r=std::getenv("FRAMELY_STORE_TEST")?cef_rect_t{0,0,1200,880}:cef_rect_t{0,0,600,840};};render.api.on_paint=[](cef_render_handler_t*,cef_browser_t*,cef_paint_element_type_t,size_t,const cef_rect_t*,const void* data,int w,int h){++paints;pixel_width=w;pixel_height=h;pixels.assign(static_cast<const unsigned char*>(data),static_cast<const unsigned char*>(data)+w*h*4);};
+ display.api.on_console_message=[](cef_display_handler_t*,cef_browser_t*,cef_log_severity_t,const cef_string_t* m,const cef_string_t*,int){auto s=text(m);std::cout<<s<<"\n";if(s=="FRAMELY_PREVIEW_STORE")snapshot("store");if(s=="FRAMELY_PREVIEW_FAVORITES")snapshot("favorites");if(s=="FRAMELY_PREVIEW_INSTALLED")snapshot("installed");if(s=="FRAMELY_PREVIEW_SETTINGS")snapshot("settings");if(s=="FRAMELY_PLUGIN_READY")ready=true;if(s=="FRAMELY_BRIDGE_PASS")passed=true;if(s.rfind("FRAMELY_BRIDGE_FAIL",0)==0)failed=true;return 1;};life.api.on_before_close=[](cef_life_span_handler_t*,cef_browser_t*){closed=true;};
+ client.api.get_render_handler=[](cef_client_t*){return render.acquire();};client.api.get_display_handler=[](cef_client_t*){return display.acquire();};client.api.get_life_span_handler=[](cef_client_t*){return life.acquire();};
+ cef_window_info_t win{};win.size=sizeof(win);win.windowless_rendering_enabled=1;cef_browser_settings_t bs{};bs.size=sizeof(bs);bs.windowless_frame_rate=30;cef_string_t uri{};str(uri,url);auto* browser=cef_browser_host_create_browser_sync(&win,&client.api,&uri,&bs,nullptr,nullptr);cef_string_utf16_clear(&uri);if(!browser)return 4;auto* host=browser->get_host(browser);
+ auto end=std::chrono::steady_clock::now()+std::chrono::seconds(20);bool injected=false;
+ while(std::chrono::steady_clock::now()<end&&!passed&&!failed){cef_do_message_loop_work();if(ready&&!injected){auto* f=browser->get_main_frame(browser);cef_string_t code{},source{};str(code,R"JS((async()=>{const wait=ms=>new Promise(r=>setTimeout(r,ms));await wait(400);if(document.querySelectorAll('input[type=range]').length!==3)throw Error('three sliders missing');const sliders=[...document.querySelectorAll('input[type=range]')];for(const [i,value,key,expected] of [[0,120,'hue',1/3],[1,55,'saturation',.55],[2,125,'brightness',1.25]]){Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(sliders[i],String(value));sliders[i].dispatchEvent(new Event('input',{bubbles:true}));sliders[i].dispatchEvent(new Event('change',{bubbles:true}));await wait(500);if(!calls.some(p=>p.method==='set'&&Math.abs(p.params[key]-expected)<1e-6))throw Error('slider '+key+' not saved');}document.querySelector('input[role=switch]').click();await wait(300);[...document.querySelectorAll('button')].find(b=>b.textContent==='中性黑白').click();await wait(700);if(!calls.some(p=>p.method==='set'&&p.params.saturation===0))throw Error('preset not saved');[...document.querySelectorAll('button')].find(b=>b.textContent==='柔和暖色').click();await wait(700);if(!calls.some(p=>p.method==='set'&&p.params.hue===.08))throw Error('warm preset not saved');[...document.querySelectorAll('button')].find(b=>b.textContent==='恢复原始效果').click();await wait(300);[...document.querySelectorAll('button')].find(b=>b.textContent==='中性黑白').click();await wait(700);if(calls.filter(p=>p.method==='set'&&p.params.saturation===0).length!==2)throw Error('preset after reset not saved');document.querySelector('summary').click();await wait(300);if(!document.body.innerText.includes('黑白摄像头不会'))throw Error('help missing');console.log('FRAMELY_PREVIEW_SETTINGS');console.log('FRAMELY_BRIDGE_PASS');})().catch(e=>console.error('FRAMELY_BRIDGE_FAIL '+e)))JS");f->execute_java_script(f,&code,&source,1);cef_string_utf16_clear(&code);f->base.release(&f->base);injected=true;}std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+ host->close_browser(host,1);for(int i=0;i<400&&!closed;i++){cef_do_message_loop_work();std::this_thread::sleep_for(std::chrono::milliseconds(5));}bool ok=passed&&!failed&&paints>0&&closed;std::cout<<"BROWSER_RESULT pass="<<ok<<" paints="<<paints<<" closed="<<closed<<"\n";if(!closed)_Exit(5);host->base.release(&host->base);browser->base.release(&browser->base);cef_shutdown();return ok?0:5;
+}

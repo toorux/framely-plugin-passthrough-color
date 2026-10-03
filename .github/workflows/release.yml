@@ -1,0 +1,86 @@
+name: Release plugin
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check release version
+        id: metadata
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          manifest = json.loads(pathlib.Path('manifest.json').read_text())
+          tag = 'v' + manifest['version']
+          if os.environ['RELEASE_REF'] != 'refs/tags/' + tag:
+              raise SystemExit('Run this workflow on the tag matching manifest.version: ' + tag)
+          filename = manifest['id'] + '-' + manifest['version'] + '.framely'
+          expected = 'https://github.com/' + os.environ['REPOSITORY'] + '/releases/download/' + tag + '/' + filename
+          if manifest.get('downloadUrl') != expected:
+              raise SystemExit('manifest.downloadUrl must match the release asset URL')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('tag=' + tag + '\n')
+          pathlib.Path('release-notes.md').write_text(manifest['changelog'] + '\n')
+          PY
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Check and test
+        run: |
+          npm run typecheck
+          npm test
+          bash native/test.sh
+      - name: Build and package
+        run: |
+          npm run build
+          python3 scripts/pack.py
+          cd dist
+          sha256sum --check SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            dist/*.framely
+            dist/SHA256SUMS
+            release-notes.md
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/*.framely dist/SHA256SUMS \
+            --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
