@@ -62,7 +62,7 @@ framely install dist/tooru.passthrough-color-0.1.3.framely --approve
 
 ## 发布
 
-推送与 `manifest.json` 版本一致的标签，Actions 自动构建 ARM64 插件、校验并发布 GitHub Release：
+推送与 `manifest.json` 版本一致的标签，Actions 自动构建 ARM64 插件、校验并发布 GitHub Release，随后将该版本的固定源码提交登记到 `DATABASE_REPOSITORY` 指定的数据库仓库。正式版更新 `main`，预发布版（如 `0.1.4-preview.1`）更新 `testing`。向上游原仓库的 PR 手动提交。
 
 ```bash
 git tag v0.1.3
@@ -70,6 +70,13 @@ git push origin v0.1.3
 ```
 
 发布新版本时同时更新 `manifest.json`、`package.json`、`package-lock.json` 的版本号，以及清单中的 `downloadUrl`。已发布版本不覆盖附件。
+
+首次使用数据库登记流程，在本仓库 Settings → Secrets and variables → Actions 配置：
+
+- Variables：添加 `DATABASE_REPOSITORY`，值为目标仓库的 `owner/repository`，例如 `toorux/framely-plugin-database`。
+- Secrets：添加 `DATABASE_TOKEN`，使用仅授予上述目标仓库 **Contents: Read and write** 权限的 fine-grained token。
+
+已有 Release 可在 Actions → Register plugin in database → Run workflow 中填写标签单独登记，无需重新发布附件。
 
 插件包在 [Releases](https://github.com/toorux/framely-plugin-passthrough-color/releases) 下载，附件包含 `.framely` 与 `SHA256SUMS`。
 

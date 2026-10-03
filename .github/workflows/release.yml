@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     outputs:
       tag: ${{ steps.metadata.outputs.tag }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,7 +29,9 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           python3 - <<'PY'
-          import json, os, pathlib
+          import json, os, pathlib, sys
+          sys.path.insert(0, 'scripts')
+          from submit_database import channel
           manifest = json.loads(pathlib.Path('manifest.json').read_text())
           tag = 'v' + manifest['version']
           if os.environ['RELEASE_REF'] != 'refs/tags/' + tag:
@@ -39,6 +42,7 @@ jobs:
               raise SystemExit('manifest.downloadUrl must match the release asset URL')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('tag=' + tag + '\n')
+              output.write('prerelease=' + str(channel(manifest['version']) == 'testing').lower() + '\n')
           pathlib.Path('release-notes.md').write_text(manifest['changelog'] + '\n')
           PY
       - uses: actions/setup-node@v4
@@ -81,6 +85,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
         run: |
+          args=()
+          if [[ "$PRERELEASE" == true ]]; then args+=(--prerelease); fi
           gh release create "$RELEASE_TAG" dist/*.framely dist/SHA256SUMS \
-            --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
+            --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md "${args[@]}"
+
+  submit-database:
+    needs: [build, release]
+    uses: ./.github/workflows/submit-database.yml
+    with:
+      release_tag: ${{ needs.build.outputs.tag }}
+    secrets:
+      DATABASE_TOKEN: ${{ secrets.DATABASE_TOKEN }}
