@@ -64,7 +64,7 @@ framely install dist/tooru.passthrough-color-0.1.4.framely --approve
 
 ## 发布
 
-推送与 `manifest.json` 版本一致的标签，Actions 自动构建 ARM64 插件、校验并发布 GitHub Release，随后同步 `DATABASE_REPOSITORY` 指定的数据库 Fork 的上游同名分支，再登记该版本的固定源码提交。正式版更新 `main`，预发布版（如 `0.1.4-preview.1`）更新 `testing`。向上游原仓库的 PR 手动提交。
+推送与 `manifest.json` 版本一致的标签，Actions 自动构建 ARM64 插件、校验并发布 GitHub Release，随后将该版本的固定源码提交登记到 `DATABASE_REPOSITORY` 指定的数据库仓库。正式版更新 `main`，预发布版（如 `0.1.4-preview.1`）更新 `testing`。向上游原仓库的 PR 手动提交。
 
 ```bash
 git tag v0.1.4
@@ -78,7 +78,7 @@ git push origin v0.1.4
 - Variables：添加 `DATABASE_REPOSITORY`，值为目标仓库的 `owner/repository`，例如 `toorux/framely-plugin-database`。
 - Secrets：添加 `DATABASE_TOKEN`，使用仅授予上述目标仓库 **Contents: Read and write** 权限的 fine-grained token。
 
-向上游提交 PR 时使用仓库所有者账号或经验证有写权限的维护者账号。插件 ID 使用 `tooru.passthrough-color`，对应 submodule 路径为 `plugins/tooru.passthrough-color`；同一前缀必须属于同一个 GitHub 所有者，每个所有者最多占用五个前缀。上游会在自动合并前下载包并校验 Release SHA256、清单与载荷，同时验证仓库归属。Fork 与上游合并冲突时登记任务失败，解决冲突后再运行登记。
+向上游提交 PR 时使用仓库所有者账号或经验证有写权限的维护者账号。插件 ID 使用 `tooru.passthrough-color`，对应 submodule 路径为 `plugins/tooru.passthrough-color`；同一前缀必须属于同一个 GitHub 所有者，每个所有者最多占用五个前缀。上游会在自动合并前下载包并校验 Release SHA256、清单与载荷，同时验证仓库归属。提交上游 PR 时若存在冲突，再手动同步上游并解决。
 
 已有 Release 可在 Actions → Register plugin in database → Run workflow 中填写标签单独登记，无需重新发布附件。
 

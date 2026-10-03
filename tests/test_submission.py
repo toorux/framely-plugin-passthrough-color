@@ -43,16 +43,30 @@ class Submission(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 submission.validate_registration_manifest({**manifest, **change})
 
-    def test_fork_sync_uses_matching_upstream_branch(self):
-        with patch.object(submission, 'run') as run:
-            self.assertTrue(submission.sync_upstream('.', {'fork': True, 'parent': {'full_name': 'community/database'}}, 'testing'))
-        self.assertEqual([call.args for call in run.call_args_list], [
-            ('git', 'fetch', 'https://github.com/community/database.git', 'refs/heads/testing'),
-            ('git', 'merge', '--no-edit', 'FETCH_HEAD')])
-        with patch.object(submission, 'run') as run:
-            self.assertFalse(submission.sync_upstream('.', {'fork': False}, 'main'))
-        run.assert_not_called()
-        with self.assertRaises(ValueError):submission.sync_upstream('.', {'fork': True}, 'main')
+    def test_submit_only_registers_plugin_without_syncing_upstream(self):
+        import json
+        manifest = {'id': 'tooru.passthrough-color', 'version': '0.1.4-preview.2'}
+        release = {'draft': False, 'prerelease': True, 'assets': [{
+            'browser_download_url': submission.release_url(manifest, 'author/plugin'),
+            'state': 'uploaded', 'digest': 'sha256:' + 'a' * 64}]}
+        def result(*args, **kwargs):
+            if args[:2] == ('git', 'rev-parse'): return 'b' * 40
+            if args[:2] == ('git', 'show'): return json.dumps(manifest)
+            if args[:2] == ('gh', 'api'): return json.dumps(release)
+            return ''
+        environment = {'DATABASE_REPOSITORY': 'author/database', 'GH_TOKEN': 'test-token',
+                       'GITHUB_REPOSITORY': 'author/plugin'}
+        for changed in (False, True):
+            with patch.dict(os.environ, environment, clear=True), patch.object(submission, 'run', side_effect=result) as run, patch.object(submission, 'prepare') as prepare, patch.object(submission.subprocess, 'run') as diff:
+                diff.return_value.returncode = int(changed)
+                submission.submit('v0.1.4-preview.2')
+            commands = [call.args for call in run.call_args_list]
+            self.assertFalse(any(command[:2] in (('git', 'fetch'), ('git', 'merge')) for command in commands))
+            self.assertEqual([command for command in commands if command[:2] == ('gh', 'api')],
+                             [('gh', 'api', 'repos/author/plugin/releases/tags/v0.1.4-preview.2')])
+            pushes = [command for command in commands if command[:2] == ('git', 'push')]
+            self.assertEqual(pushes, [('git', 'push', 'origin', 'HEAD:refs/heads/testing')] if changed else [])
+            self.assertEqual(prepare.call_args.args[1:], ('https://github.com/author/plugin.git', 'b' * 40, manifest['id']))
 
     def test_pins_release_commit_preserves_other_modules_and_retries_without_diff(self):
         with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'GIT_ALLOW_PROTOCOL': 'file'}):
