@@ -3,7 +3,7 @@
   "apiVersion": 1,
   "id": "tooru.passthrough-color",
   "name": "透视调色",
-  "version": "0.1.4-preview.3",
+  "version": "0.1.4-preview.4",
   "author": "tooru",
   "homepage": "https://github.com/toorux/framely-plugin-passthrough-color",
   "description": "调整 Steam Frame 黑白透视的色调、染色饱和度与亮度。",
@@ -13,7 +13,7 @@
     "色调",
     "黑白"
   ],
-  "changelog": "修复数据库登记流程：只更新插件登记，不再自动同步数据库上游。",
+  "changelog": "补充插件仓库主页地址，支持从商店访问源码仓库。",
   "icon": "icon.png",
   "backend": {
     "entry": "backend.py",
