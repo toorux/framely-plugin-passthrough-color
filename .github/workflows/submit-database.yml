@@ -36,5 +36,6 @@ jobs:
         env:
           DATABASE_REPOSITORY: ${{ vars.DATABASE_REPOSITORY }}
           GH_TOKEN: ${{ secrets.DATABASE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: python3 scripts/submit_database.py "$RELEASE_TAG"

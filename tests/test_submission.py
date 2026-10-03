@@ -31,6 +31,29 @@ class Submission(unittest.TestCase):
             with self.assertRaises(ValueError):
                 submission.channel(version)
 
+    def test_registration_metadata_matches_new_database_rules(self):
+        manifest = {'id': 'tooru.passthrough-color', 'version': '0.1.4'}
+        submission.validate_registration_manifest(manifest)
+        custom = {**manifest, 'downloadUrl': 'https://example.org/plugin.framely', 'downloadSha256': 'a' * 64}
+        submission.validate_registration_manifest(custom)
+        for change in ({'id': 'plugin'}, {'id': 'tooru..plugin'}, {'id': 'Tooru.plugin'},
+                       {'downloadUrl': 'https://example.org/plugin.framely'},
+                       {'downloadUrl': 'http://example.org/plugin.framely', 'downloadSha256': 'a' * 64},
+                       {'downloadSha256': 'bad'}, {'downloadSha256': 1}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                submission.validate_registration_manifest({**manifest, **change})
+
+    def test_fork_sync_uses_matching_upstream_branch(self):
+        with patch.object(submission, 'run') as run:
+            self.assertTrue(submission.sync_upstream('.', {'fork': True, 'parent': {'full_name': 'community/database'}}, 'testing'))
+        self.assertEqual([call.args for call in run.call_args_list], [
+            ('git', 'fetch', 'https://github.com/community/database.git', 'refs/heads/testing'),
+            ('git', 'merge', '--no-edit', 'FETCH_HEAD')])
+        with patch.object(submission, 'run') as run:
+            self.assertFalse(submission.sync_upstream('.', {'fork': False}, 'main'))
+        run.assert_not_called()
+        with self.assertRaises(ValueError):submission.sync_upstream('.', {'fork': True}, 'main')
+
     def test_pins_release_commit_preserves_other_modules_and_retries_without_diff(self):
         with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'GIT_ALLOW_PROTOCOL': 'file'}):
             root = pathlib.Path(temporary)

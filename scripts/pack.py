@@ -1,9 +1,15 @@
 """Build a deterministic unsigned Framely package from this plugin's payload."""
 import hashlib
 import json
+import os
+import re
+import subprocess
+
 import pathlib
 import stat
 import zipfile
+
+from submit_database import release_url
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PAYLOAD_FILES = {
@@ -12,9 +18,25 @@ PAYLOAD_FILES = {
 }
 
 
-def pack(root=ROOT):
+def download_url(manifest, root, repository=None):
+    if manifest.get('downloadUrl'):
+        return manifest['downloadUrl']
+    repository = repository or os.environ.get('GITHUB_REPOSITORY')
+    if not repository:
+        remote = subprocess.check_output(['git', '-C', str(root), 'remote', 'get-url', 'origin'], text=True).strip()
+        match = re.fullmatch(r'(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?', remote)
+        if not match:
+            raise ValueError('Cannot infer GitHub repository; set GITHUB_REPOSITORY or downloadUrl')
+        repository = match.group(1)
+    return release_url(manifest, repository)
+
+
+def pack(root=ROOT, repository=None):
     root = pathlib.Path(root)
     manifest = json.loads((root / 'manifest.json').read_text())
+    manifest['downloadUrl'] = download_url(manifest, root, repository)
+    # The whole-package checksum belongs to source registration, never inside its own ZIP.
+    manifest.pop('downloadSha256', None)
     payload = root / 'payload'
     paths = list(payload.iterdir())
     if {p.name for p in paths} != PAYLOAD_FILES:

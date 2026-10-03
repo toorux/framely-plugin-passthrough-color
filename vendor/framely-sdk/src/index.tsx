@@ -9,6 +9,7 @@ function bridge():Bridge{const b=(window as any).__framelyBridge;if(!b)throw new
 export const framely={
  call:<T=unknown>(method:string,params:unknown={}):Promise<T>=>bridge().request('call',{method,params}),
  windows:{open:(window:string)=>bridge().request('window.open',{window}),close:(window:string)=>bridge().request('window.close',{window})},
+ dependencies:():Promise<DependencyStatus[]>=>bridge().request('dependencies'),
  notifications:{send:(notification:Notification)=>bridge().request('notification.send',{notification}),remove:(id:string)=>bridge().request('notification.remove',{id})},
  onEvent:(callback:(event:unknown)=>void)=>bridge().subscribe(callback),
 };
@@ -25,3 +26,6 @@ export function Notice({children,error=false}:{children:React.ReactNode;error?:b
 export function Tabs({value,onChange,tabs}:{value:string;onChange:(value:string)=>void;tabs:{id:string;label:string}[]}){return <div role="tablist" style={{display:'flex',gap:8}}>{tabs.map(t=><button key={t.id} role="tab" aria-selected={value===t.id} onClick={()=>onChange(t.id)} style={{flex:1,background:value===t.id?'#245675':undefined}}>{t.label}</button>)}</div>}
 export function usePluginEvent(callback:(event:unknown)=>void){const ref=React.useRef(callback);ref.current=callback;React.useEffect(()=>framely.onEvent(event=>ref.current(event)),[]);}
 export function useBackend<T=unknown>(method:string,params:unknown={}){const[data,setData]=React.useState<T|null>(null),[error,setError]=React.useState<string|null>(null),[loading,setLoading]=React.useState(false);const active=React.useRef(true);React.useEffect(()=>{active.current=true;return()=>{active.current=false;}},[]);const call=React.useCallback(async()=>{setLoading(true);setError(null);try{const result=await framely.call<T>(method,params);if(active.current)setData(result);return result;}catch(e){if(active.current)setError(String(e));throw e;}finally{if(active.current)setLoading(false);}},[method,JSON.stringify(params)]);return{data,error,loading,call};}
+
+export interface DependencyStatus {id:string;required:boolean;constraint:string|{version:string;source:string};version:string|null;enabled:boolean;matches:boolean;available:boolean;state?:{phase:string}|null}
+export function useDependencies(){const [items,setItems]=React.useState<DependencyStatus[]>([]),[error,setError]=React.useState<string|null>(null);React.useEffect(()=>{let live=true;const load=()=>{framely.dependencies().then(v=>{if(live){setItems(v);setError(null);}}).catch(e=>{if(live)setError(String(e));});};load();const off=framely.onEvent(e=>{if((e as any)?.type==='dependencies.changed')load();});return()=>{live=false;off();};},[]);return {items,error};}

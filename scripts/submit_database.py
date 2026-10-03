@@ -7,6 +7,8 @@ import re
 import subprocess
 import tempfile
 
+PLUGIN_ID = re.compile(r'[a-z0-9]+\.[a-z0-9]+(?:[.-][a-z0-9]+)*\Z')
+
 def run(*args, cwd=None):
     return subprocess.check_output(args, cwd=cwd, text=True).strip()
 
@@ -17,9 +19,51 @@ def channel(version):
     return 'testing' if '-' in version.split('+')[0] else 'main'
 
 
+def release_url(manifest, repository):
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
+        raise ValueError('Expected a GitHub owner/repository')
+    channel(manifest['version'])
+    if not PLUGIN_ID.fullmatch(manifest['id']):
+        raise ValueError('Invalid plugin ID')
+    return ('https://github.com/' + repository + '/releases/download/v' +
+            manifest['version'] + '/' + manifest['id'] + '-' + manifest['version'] + '.framely')
+
+
+def validate_registration_manifest(manifest):
+    if not PLUGIN_ID.fullmatch(manifest['id']):
+        raise ValueError('Plugin ID must be namespace.name')
+    channel(manifest['version'])
+    if 'downloadUrl' in manifest:
+        from urllib.parse import urlsplit
+        url = manifest['downloadUrl']
+        parsed = urlsplit(url)
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or
+                parsed.password or parsed.fragment or any(c.isspace() for c in url)):
+            raise ValueError('Custom downloadUrl must be HTTPS')
+        digest = manifest.get('downloadSha256')
+        # Fixed GitHub Release URLs may obtain their digest from the release API.
+        if digest is None and parsed.hostname != 'github.com':
+            raise ValueError('Custom downloadUrl requires downloadSha256')
+    if 'downloadSha256' in manifest and (not isinstance(manifest['downloadSha256'], str) or not re.fullmatch(r'[0-9a-fA-F]{64}', manifest['downloadSha256'])):
+        raise ValueError('downloadSha256 must be a 64-character SHA256 hex digest')
+
+
+def sync_upstream(database, metadata, base):
+    """Bring the author's fork up to date without overwriting its plugin pins."""
+    if not metadata.get('fork'):
+        return False
+    parent = metadata.get('parent', {}).get('full_name', '')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', parent):
+        raise ValueError('Cannot identify the database fork upstream')
+    upstream = 'https://github.com/' + parent + '.git'
+    run('git', 'fetch', upstream, 'refs/heads/' + base, cwd=database)
+    run('git', 'merge', '--no-edit', 'FETCH_HEAD', cwd=database)
+    return True
+
+
 def prepare(database, plugin_url, commit, identifier):
     """Stage only the submodule registration, preserving the rest of the database."""
-    if not re.fullmatch(r'[a-z0-9]+(?:[.-][a-z0-9]+)+', identifier):
+    if not PLUGIN_ID.fullmatch(identifier):
         raise ValueError('Invalid plugin ID')
     path = 'plugins/' + identifier
     modules = pathlib.Path(database) / '.gitmodules'
@@ -49,6 +93,7 @@ def submit(tag):
     plugin_url = 'https://github.com/' + plugin_repo + '.git'
     commit = run('git', 'rev-parse', '--verify', 'refs/tags/' + tag + '^{commit}')
     manifest = json.loads(run('git', 'show', commit + ':manifest.json'))
+    validate_registration_manifest(manifest)
     version, identifier = manifest['version'], manifest['id']
     if tag != 'v' + version:
         raise ValueError('Release tag must match manifest.version')
@@ -58,23 +103,28 @@ def submit(tag):
         raise ValueError('Release must be published before submission')
     if release['prerelease']:
         base = 'testing'
-    filename = identifier + '-' + version + '.framely'
-    expected_url = 'https://github.com/' + plugin_repo + '/releases/download/' + tag + '/' + filename
-    if manifest.get('downloadUrl') != expected_url or expected_url not in [a['browser_download_url'] for a in release['assets']]:
-        raise ValueError('Release asset must exist and match manifest.downloadUrl')
+    expected_url = release_url(manifest, plugin_repo)
+    if 'downloadUrl' not in manifest:
+        assets = [a for a in release['assets'] if a['browser_download_url'] == expected_url and a.get('state') == 'uploaded']
+        if len(assets) != 1 or not re.fullmatch(r'sha256:[0-9a-fA-F]{64}', assets[0].get('digest') or ''):
+            raise ValueError('Published release asset must provide its SHA256 digest')
+    metadata = json.loads(run('gh', 'api', 'repos/' + repository))
     with tempfile.TemporaryDirectory() as temporary:
         database = pathlib.Path(temporary) / 'database'
         run('gh', 'auth', 'setup-git')
         run('git', 'clone', '--branch', base, 'https://github.com/' + repository + '.git', str(database))
+        run('git', 'config', 'user.name', 'github-actions[bot]', cwd=database)
+        run('git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com', cwd=database)
+        upstream_synced = sync_upstream(database, metadata, base)
         prepare(database, plugin_url, commit, identifier)
         # Validate the pinned manifests and actual release packages before updating the channel.
         run('python3', 'scripts/database.py', 'fetch', cwd=database)
         run('python3', 'scripts/database.py', 'validate', '--packages', cwd=database)
         if subprocess.run(['git', 'diff', '--cached', '--quiet'], cwd=database).returncode == 0:
+            if upstream_synced:
+                run('git', 'push', 'origin', 'HEAD:refs/heads/' + base, cwd=database)
             print('Plugin release is already registered on ' + base)
             return
-        run('git', 'config', 'user.name', 'github-actions[bot]', cwd=database)
-        run('git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com', cwd=database)
         run('git', 'commit', '-m', 'Register ' + identifier + ' ' + version, cwd=database)
         run('git', 'push', 'origin', 'HEAD:refs/heads/' + base, cwd=database)
         url = 'https://github.com/' + repository + '/tree/' + base

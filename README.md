@@ -4,7 +4,7 @@
 
 调节 Steam Frame **黑白透视的染色色调、染色饱和度和亮度增益**，提供 React 快捷页面、滑块、预设、自动保存与一键恢复。不会让黑白摄像头产生真实彩色图像。
 
-使用 Framely 0.3 插件协议。后端声明 `runAs: steamos`，访问当前 Steam 会话的设置和用户 systemd 配置；无需 root，不请求网络、窗口或通知权限。`autostart: true` 用于恢复已保存的调色参数。
+使用 Framely 0.4 SDK，插件清单的 apiVersion 为 1。后端声明 `runAs: steamos`，访问当前 Steam 会话的设置和用户 systemd 配置；无需 root，不请求网络、窗口或通知权限。`autostart: true` 用于恢复已保存的调色参数。
 
 ## 如何调整
 
@@ -54,27 +54,29 @@ FRAMELY_CEF_ROOT=/path/to/cef bash tests/cef-smoke.sh
 # 可选：测试匹配的只读 compositor 副本
 FRAME_TEST_COMPOSITOR=/path/to/vrcompositor bash native/test.sh
 npm run pack
-framely verify dist/tooru.passthrough-color-0.1.3.framely
-framely install dist/tooru.passthrough-color-0.1.3.framely --approve
+framely verify dist/tooru.passthrough-color-0.1.4.framely
+framely install dist/tooru.passthrough-color-0.1.4.framely --approve
 ```
 
-发布到插件数据库前，在 manifest 中声明具体版本 Release 的 `downloadUrl` 并发布插件包；数据库通过 submodule 固定源码提交，自动读取清单并计算包 SHA256，不需要密钥或签名。
+下载地址按仓库、插件 ID 和版本自动生成，打包时写入包内 manifest；数据库通过 submodule 固定源码提交，自动读取清单并将下载包 SHA256 与 Release 附件哈希比对，不需要密钥或签名。
 
 ## 发布
 
-推送与 `manifest.json` 版本一致的标签，Actions 自动构建 ARM64 插件、校验并发布 GitHub Release，随后将该版本的固定源码提交登记到 `DATABASE_REPOSITORY` 指定的数据库仓库。正式版更新 `main`，预发布版（如 `0.1.4-preview.1`）更新 `testing`。向上游原仓库的 PR 手动提交。
+推送与 `manifest.json` 版本一致的标签，Actions 自动构建 ARM64 插件、校验并发布 GitHub Release，随后同步 `DATABASE_REPOSITORY` 指定的数据库 Fork 的上游同名分支，再登记该版本的固定源码提交。正式版更新 `main`，预发布版（如 `0.1.4-preview.1`）更新 `testing`。向上游原仓库的 PR 手动提交。
 
 ```bash
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.4
+git push origin v0.1.4
 ```
 
-发布新版本时同时更新 `manifest.json`、`package.json`、`package-lock.json` 的版本号，以及清单中的 `downloadUrl`。已发布版本不覆盖附件。
+发布新版本只需更新版本号，不需要填写或修改下载地址。插件版本以 `manifest.json` 为准；`package.json` 和 `package-lock.json` 的 npm 版本可按需同步。已发布版本不覆盖附件。
 
 首次使用数据库登记流程，在本仓库 Settings → Secrets and variables → Actions 配置：
 
 - Variables：添加 `DATABASE_REPOSITORY`，值为目标仓库的 `owner/repository`，例如 `toorux/framely-plugin-database`。
 - Secrets：添加 `DATABASE_TOKEN`，使用仅授予上述目标仓库 **Contents: Read and write** 权限的 fine-grained token。
+
+向上游提交 PR 时使用仓库所有者账号或经验证有写权限的维护者账号。插件 ID 使用 `tooru.passthrough-color`，对应 submodule 路径为 `plugins/tooru.passthrough-color`；同一前缀必须属于同一个 GitHub 所有者，每个所有者最多占用五个前缀。上游会在自动合并前下载包并校验 Release SHA256、清单与载荷，同时验证仓库归属。Fork 与上游合并冲突时登记任务失败，解决冲突后再运行登记。
 
 已有 Release 可在 Actions → Register plugin in database → Run workflow 中填写标签单独登记，无需重新发布附件。
 
@@ -93,3 +95,5 @@ git push origin v0.1.3
 ## 生命周期
 
 0.1.3 需要 Framely 0.3。声明正常启动/停止及独立异常清理、卸载清理；钩子使用插件原本的用户身份，默认最多重试 3 次。异常清理不启动或重启 SteamVR，保留用户设置。
+
+当前版本需要 Framely 0.4，声明独占资源 `steamvr.passthrough-color`，防止另一个声明同名资源的插件同时启用。SDK 已同步依赖状态查询；本插件没有其他必需插件依赖。

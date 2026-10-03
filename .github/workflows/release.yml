@@ -31,15 +31,13 @@ jobs:
           python3 - <<'PY'
           import json, os, pathlib, sys
           sys.path.insert(0, 'scripts')
-          from submit_database import channel
+          from submit_database import channel, release_url, validate_registration_manifest
           manifest = json.loads(pathlib.Path('manifest.json').read_text())
+          validate_registration_manifest(manifest)
           tag = 'v' + manifest['version']
           if os.environ['RELEASE_REF'] != 'refs/tags/' + tag:
               raise SystemExit('Run this workflow on the tag matching manifest.version: ' + tag)
-          filename = manifest['id'] + '-' + manifest['version'] + '.framely'
-          expected = 'https://github.com/' + os.environ['REPOSITORY'] + '/releases/download/' + tag + '/' + filename
-          if manifest.get('downloadUrl') != expected:
-              raise SystemExit('manifest.downloadUrl must match the release asset URL')
+          release_url(manifest, os.environ['REPOSITORY'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('tag=' + tag + '\n')
               output.write('prerelease=' + str(channel(manifest['version']) == 'testing').lower() + '\n')
