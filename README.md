@@ -60,6 +60,8 @@ framely install dist/tooru.passthrough-color-0.1.4.framely --approve
 
 下载地址按仓库、插件 ID 和版本自动生成，打包时写入包内 manifest；数据库通过 submodule 固定源码提交，自动读取清单并将下载包 SHA256 与 Release 附件哈希比对，不需要密钥或签名。
 
+图标只使用清单中的 `icon` 配置，仓库和包内均包含同一路径的 PNG。数据库自动生成固定提交的商店图片地址，并校验仓库图片与包内图标一致。
+
 ## 发布
 
 推送与 `manifest.json` 版本一致的标签，Actions 自动构建 ARM64 插件、校验并发布 GitHub Release，随后同步 `DATABASE_REPOSITORY` 指定的数据库 Fork 的上游同名分支，再登记该版本的固定源码提交。正式版更新 `main`，预发布版（如 `0.1.4-preview.1`）更新 `testing`。向上游原仓库的 PR 手动提交。
