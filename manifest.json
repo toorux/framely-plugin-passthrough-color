@@ -25,7 +25,6 @@
   "ui": {
     "quickPage": "page.js"
   },
-  "permissions": [],
   "files": {},
   "lifecycle": {
     "onStart": true,
