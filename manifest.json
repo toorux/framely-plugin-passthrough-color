@@ -42,11 +42,5 @@
         "--crash-cleanup"
       ]
     }
-  },
-  "exclusiveResources": [
-    "steamvr.passthrough-color"
-  ],
-  "conflicts": {
-    "framely.passthrough-color": "*"
   }
 }
