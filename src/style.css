@@ -14,3 +14,5 @@
 @media(max-width:480px){.presets{grid-template-columns:1fr}.reset-row{align-items:stretch;flex-direction:column}}
 
 .color-wheel{width:46px;height:46px;flex:none;border-radius:50%;background:conic-gradient(#f27070,#e5ce6d,#77cfa3,#74bddd,#a59bdf,#f27070);box-shadow:inset 0 0 0 10px #10182055}
+
+.mode-buttons{display:flex;gap:0;margin-bottom:22px;border:1px solid var(--line);border-radius:5px;overflow:hidden}.mode-buttons button{flex:1;min-width:0;padding:12px 6px;border:0;border-right:1px solid var(--line);border-radius:0;background:transparent;font-size:18px}.mode-buttons button:last-child{border-right:0}.mode-buttons button.active{background:#dce5ec;color:#192129;font-weight:600}.mode-buttons button.active:hover:not(:disabled){background:#fff}.temperature-ends{display:flex;justify-content:space-between;margin-top:-4px}

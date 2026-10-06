@@ -22,6 +22,13 @@
 typedef void (*Upload)(void *, void *, const void *);
 extern void frame_sv_entry(void);
 extern int frame_sv_prepare(void *, const void *, int, float, float);
+extern uint64_t frame_color_pack(float,float,float);
+extern void frame_color_unpack(uint64_t,float*,float*,float*);
+extern int frame_color_prepare(void*,const void*,float,float,float,int);
+extern void frame_color_shader_enable(void);
+extern unsigned frame_color_shader_mask(void);
+static _Atomic uint64_t color_cached=UINT64_C(0x27102710);
+static const char *color_file;
 static _Atomic uint64_t cached = UINT64_C(0x3f8000003f800000);
 static _Atomic int stopping;
 static _Atomic uint64_t uploads, matched_mono, matched_rgb, unmatched;
@@ -38,13 +45,14 @@ static uint64_t pack(float s, float v) {
 }
 /* Strict, bounded test-control JSON. A CEF/OpenVR bridge is not implemented. */
 static const char *ws(const char *p) { while (*p && isspace((unsigned char)*p)) ++p; return p; }
-static int parse_control(const char *p, uint64_t *result) {
-    float s=1,v=1; unsigned seen=0;
+static int parse_control_ex(const char *p, uint64_t *result,int color) {
+    float s=1,v=1,t=0; unsigned seen=0;
     p=ws(p); if (*p++!='{') return 0; p=ws(p);
     while (*p!='}') {
         unsigned bit; float *dst;
         if (!strncmp(p,"\"saturation\"",12)) { bit=1; dst=&s; p+=12; }
         else if (!strncmp(p,"\"brightness\"",12)) { bit=2; dst=&v; p+=12; }
+        else if (color&&!strncmp(p,"\"temperature\"",13)) {bit=4;dst=&t;p+=13;}
         else return 0;
         if (seen&bit) return 0;
         seen|=bit;
@@ -62,24 +70,27 @@ static int parse_control(const char *p, uint64_t *result) {
         p=ws(p); if (*p=='}') return 0;
     }
     p=ws(p+1); if (*p) return 0;
-    if (s<0||s>1||v<.25f||v>1.5f) return 0;
-    *result=pack(s,v); return 1;
+    if (s<0||s>(color?2:1)||v<.25f||v>1.5f||t< -1||t>1) return 0;
+    *result=color?frame_color_pack(s,v,t):pack(s,v); return 1;
 }
-static uint64_t read_control(void) {
-    const uint64_t identity=UINT64_C(0x3f8000003f800000);
+#ifdef FRAME_SV_TEST
+static int parse_control(const char *p,uint64_t *out){return parse_control_ex(p,out,0);}
+#endif
+static uint64_t read_control_ex(const char *path,int color) {
+    const uint64_t identity=color?UINT64_C(0x27102710):UINT64_C(0x3f8000003f800000);
     char text[257]; struct stat st;
-    int fd=open(control_file,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
+    int fd=path?open(path,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK):-1;
     if (fd<0) return identity;
     if (fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_uid!=geteuid()||st.st_size<2||st.st_size>256) { close(fd); return identity; }
     ssize_t count=read(fd,text,sizeof(text)-1); close(fd);
     if (count!=st.st_size||memchr(text,0,(size_t)count)) return identity;
     text[count]=0; uint64_t value;
-    return parse_control(text,&value)?value:identity;
+    return parse_control_ex(text,&value,color)?value:identity;
 }
 static void publish_status(void){
  const char *path=getenv("FRAME_SV_STATUS_FILE");if(!path||path[0]!='/'||strlen(path)>4000)return;
  char temporary[4096],json[512];snprintf(temporary,sizeof(temporary),"%s.%ld.tmp",path,(long)getpid());
- int n=snprintf(json,sizeof(json),"{\"pid\":%ld,\"active\":true,\"matchedMono\":%llu,\"matchedRgb\":%llu}\n",(long)getpid(),(unsigned long long)atomic_load_explicit(&matched_mono,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&matched_rgb,memory_order_relaxed));
+ int n=snprintf(json,sizeof(json),"{\"pid\":%ld,\"active\":true,\"moduleVersion\":2,\"colorShaderMask\":%u,\"matchedMono\":%llu,\"matchedRgb\":%llu}\n",(long)getpid(),frame_color_shader_mask(),(unsigned long long)atomic_load_explicit(&matched_mono,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&matched_rgb,memory_order_relaxed));
  int fd=open(temporary,O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK,0600);if(fd<0)return;struct stat st;
  int ok=!fstat(fd,&st)&&S_ISREG(st.st_mode)&&st.st_uid==geteuid()&&write(fd,json,(size_t)n)==n;close(fd);if(ok)rename(temporary,path);else unlink(temporary);
 }
@@ -87,7 +98,8 @@ static void *read_loop(void *unused) {
     (void)unused;
     unsigned polls=0;
     while (!atomic_load_explicit(&stopping,memory_order_relaxed)) {
-        atomic_store_explicit(&cached,read_control(),memory_order_relaxed);
+        atomic_store_explicit(&cached,read_control_ex(control_file,0),memory_order_relaxed);
+        atomic_store_explicit(&color_cached,read_control_ex(color_file,1),memory_order_relaxed);
         if(++polls%4==0)publish_status();
         if (polls==4 || polls%40==0) {
             uint64_t current=atomic_load_explicit(&cached,memory_order_relaxed);
@@ -122,6 +134,17 @@ void frame_sv_upload(void *iface,void *buffer,const void *original,
     int mono=known && node[839];
     atomic_fetch_add_explicit(&uploads,1,memory_order_relaxed);
     atomic_fetch_add_explicit(known?(mono?&matched_mono:&matched_rgb):&unmatched,1,memory_order_relaxed);
+    if(known&&!mono&&!inside){
+        float cs,cv,ct;frame_color_unpack(atomic_load(&color_cached),&cs,&cv,&ct);
+        unsigned mask=frame_color_shader_mask();
+        if(!mask)cs=1; /* A loaded, fingerprinted RGB variant is sufficient. */
+        if(cv!=1||ct!=0||mask){
+            _Alignas(16) unsigned char scratch[528];
+            if(frame_color_prepare(scratch,original,cs,cv,ct,mask!=0)){
+                ++inside;call(iface,buffer,scratch);--inside;return;
+            }
+        }
+    }
     if (value==UINT64_C(0x3f8000003f800000)||inside||!mono) {
         call(iface,buffer,original); return;
     }
@@ -154,6 +177,17 @@ static void sha_block(uint32_t h[8], const unsigned char in[64]) {
     uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],z=h[7];
     for(unsigned i=0;i<64;++i) { uint32_t t=z+(rr(e,6)^rr(e,11)^rr(e,25))+((e&f)^(~e&g))+k[i]+w[i]; uint32_t u=(rr(a,2)^rr(a,13)^rr(a,22))+((a&b)^(a&c)^(b&c)); z=g;g=f;f=e;e=d+t;d=c;c=b;b=a;a=t+u; }
     h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=d;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=z;
+}
+void frame_sv_hash_bytes(const void *data,size_t size,unsigned char out[32]) {
+ uint32_t h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+ const unsigned char* p=data;size_t remaining=size;unsigned char buf[64];
+ while(remaining>=64){sha_block(h,p);p+=64;remaining-=64;}
+ memcpy(buf,p,remaining);buf[remaining++]=128;
+ if(remaining>56){memset(buf+remaining,0,64-remaining);sha_block(h,buf);remaining=0;}
+ memset(buf+remaining,0,56-remaining);uint64_t bits=(uint64_t)size*8;
+ for(unsigned i=0;i<8;i++)buf[63-i]=(unsigned char)(bits>>(i*8));
+ sha_block(h,buf);
+ for(unsigned i=0;i<8;i++)for(unsigned j=0;j<4;j++)out[i*4+j]=(unsigned char)(h[i]>>(24-j*8));
 }
 __attribute__((noinline)) static int hash_fd(int fd,unsigned char out[32]) {
     uint32_t h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
@@ -233,8 +267,10 @@ __attribute__((constructor)) static void initialize(void) {
     long page=sysconf(_SC_PAGESIZE); if(page<=0) return;
     void *veneer=make_veneer(base+profile->site,(size_t)page); if(!veneer) return;
     expected_upload=base+profile->upload; expected_vtable=base+profile->vtable;
+    color_file=getenv("FRAME_COLOR_CONTROL_FILE");
     if(!start_reader()) { munmap(veneer,(size_t)page);return; }
     if(!patch_site(base+profile->site,veneer,(size_t)page)) { stop_reader();munmap(veneer,(size_t)page);return; }
+    if(color_file&&color_file[0]=='/')frame_color_shader_enable();
     fputs("frame-sv: guarded startup hook active; default passthrough; control reader only\n",stderr);
 }
 __attribute__((destructor)) static void finalize(void) { stop_reader(); }
@@ -243,6 +279,7 @@ __attribute__((destructor)) static void finalize(void) { stop_reader(); }
 void frame_sv_test_bind(Upload fn,uintptr_t vtable) { expected_upload=(uintptr_t)fn;expected_vtable=vtable; }
 void frame_sv_test_publish(float s,float v) { atomic_store(&cached,pack(s,v)); }
 int frame_sv_test_parse(const char *s,uint64_t *out) { return parse_control(s,out); }
+int frame_color_test_parse(const char *s,uint64_t *out) { return parse_control_ex(s,out,1); }
 int frame_sv_test_hash(const char *path,unsigned char *out) { int fd=open(path,O_RDONLY);if(fd<0)return 0;int ok=hash_fd(fd,out);close(fd);return ok; }
 int frame_sv_test_accept_file(const char *path) { unsigned char digest[32];int fd=open(path,O_RDONLY);if(fd<0)return 0;int ok=hash_fd(fd,digest);close(fd);return ok&&profile_for(digest)!=0; }
 int frame_sv_test_context(const void *data) { return match_context(data); }

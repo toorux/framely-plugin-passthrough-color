@@ -4,6 +4,8 @@ import hashlib,json,math,os,pathlib,select,shlex,shutil,signal,subprocess,sys,te
 SUPPORTED={'ab33d32b15f55d356d6c4509b635fac6dca9614e6485226e75b62aaaa3aa639e','d75d3a0d3a86f8750e8f77fd43575605465c8fa2bef973a7597c4a1c8cb123b3'}
 MARKER='# Managed by tooru.passthrough-color\n'
 LEGACY_MARKER='# Managed by framely.passthrough-color\n'
+COLOR_DEFAULT={'enabled':False,'saturation':1.,'brightness':1.,'temperature':0.}
+CAMERA_API_HASH='05bece568cdfad1ecdd052a6f1aa0994ebddb6026db73c38b97eb031ea7e0c36'
 DEFAULT={'enabled':False,'hue':.67,'saturation':1.,'brightness':1.,'originalHue':None}
 
 def controls(params):
@@ -14,6 +16,16 @@ def controls(params):
    value=params[key]
    if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or not low<=value<=high:raise ValueError(f'{key} 必须在 {low}–{high} 范围内')
    out[key]=float(value)
+ return out
+
+def color_controls(params):
+ if not isinstance(params,dict) or set(params)-{'saturation','brightness','temperature'}:raise ValueError('无效彩色调节参数')
+ out={}
+ for key,(low,high) in {'saturation':(0,2),'brightness':(.25,1.5),'temperature':(-1,1)}.items():
+  if key in params:
+   v=params[key]
+   if isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) or not low<=v<=high:raise ValueError(f'{key} 必须在 {low}–{high} 范围内')
+   out[key]=float(v)
  return out
 
 def atomic(path,data):
@@ -35,15 +47,16 @@ def digest(path):
 class Backend:
  def __init__(self,payload=None,data=None,home=None,uid=None):
   self.uid=os.getuid() if uid is None else uid;self.payload=pathlib.Path(payload or pathlib.Path(__file__).resolve().parent);self.data=pathlib.Path(data or os.environ['FRAMELY_DATA_DIR']);self.home=pathlib.Path(home or os.environ['HOME']);self.data.mkdir(parents=True,exist_ok=True)
-  self.runtime=pathlib.Path(f'/run/user/{self.uid}/framely-passthrough-color');self.cache=self.home/'.local/share/framely/passthrough-color';self.dropin=self.home/'.config/systemd/user/steamvr.service.d/80-framely-passthrough-color.conf';self.state=DEFAULT.copy();self.last_error='';self.last_hue=None;self.configured=False
+  self.runtime=pathlib.Path(f'/run/user/{self.uid}/framely-passthrough-color');self.cache=self.home/'.local/share/framely/passthrough-color';self.dropin=self.home/'.config/systemd/user/steamvr.service.d/80-framely-passthrough-color.conf';self.state=DEFAULT.copy();self.color=COLOR_DEFAULT.copy();self.last_error='';self.last_hue=None;self.configured=False
   path=self.data/'settings.json'
   try:
    saved=json.loads(path.read_text());self.state.update(controls({k:saved[k] for k in ('hue','saturation','brightness') if k in saved}));self.state['enabled']=saved.get('enabled') is True
+   color=saved.get('color',{});self.color.update(color_controls({k:color[k] for k in ('saturation','brightness','temperature') if k in color}));self.color['enabled']=color.get('enabled') is True
    original=saved.get('originalHue');self.state['originalHue']=controls({'hue':original})['hue'] if original is not None else None
   except FileNotFoundError:pass
   except Exception as error:self.last_error='保存的设置无效，已回到默认值：'+str(error)
   self.env={**os.environ,'XDG_RUNTIME_DIR':f'/run/user/{self.uid}','DBUS_SESSION_BUS_ADDRESS':f'unix:path=/run/user/{self.uid}/bus'}
- def save(self):atomic(self.data/'settings.json',encode(self.state))
+ def save(self):atomic(self.data/'settings.json',encode({**self.state,'color':self.color}))
  def command(self,args):
   result=subprocess.run(args,env=self.env,capture_output=True,text=True,timeout=5)
   if result.returncode:raise RuntimeError((result.stderr or result.stdout or '运行时命令失败').strip()[-1200:])
@@ -66,7 +79,8 @@ class Backend:
   if self.runtime.stat().st_uid!=self.uid:raise RuntimeError('插件 runtime 目录属主不正确')
   self.runtime.chmod(0o700)
  def sv(self,identity=False):
-  self.runtime_dir();atomic(self.runtime/'settings.json',encode({'saturation':1 if identity else self.state['saturation'],'brightness':1 if identity else self.state['brightness']}))
+  self.runtime_dir();atomic(self.runtime/'settings.json',encode({'saturation':1 if identity or not self.state['enabled'] else self.state['saturation'],'brightness':1 if identity or not self.state['enabled'] else self.state['brightness']}))
+  atomic(self.runtime/'color.json',encode({k:COLOR_DEFAULT[k] if identity or not self.color['enabled'] else self.color[k] for k in ('saturation','brightness','temperature')}))
  def helper(self):
   # Framely intentionally extracts only backend.entry as executable.
   if self.cache.is_symlink():raise RuntimeError('插件缓存目录不能为符号链接')
@@ -83,7 +97,7 @@ class Backend:
   # OpenVR may emit its own diagnostics before the helper's final JSON line.
   parsed=json.loads(result.strip().splitlines()[-1]);return controls({'hue':parsed['hue']})['hue']
  def configuration(self):
-  return MARKER+'[Service]\nEnvironment="VRCOMPOSITOR_LD_PRELOAD='+str(self.cache/'libframely_passthrough_color.so')+'"\nEnvironment="FRAME_SV_ENABLE=1"\nEnvironment="FRAME_SV_CONTROL_FILE='+str(self.runtime/'settings.json')+'"\nEnvironment="FRAME_SV_STATUS_FILE='+str(self.runtime/'status.json')+'"\n'
+  return MARKER+'[Service]\nEnvironment="VRCOMPOSITOR_LD_PRELOAD='+str(self.cache/'libframely_passthrough_color.so')+'"\nEnvironment="FRAME_SV_ENABLE=1"\nEnvironment="FRAME_SV_CONTROL_FILE='+str(self.runtime/'settings.json')+'"\nEnvironment="FRAME_COLOR_CONTROL_FILE='+str(self.runtime/'color.json')+'"\nEnvironment="FRAME_SV_STATUS_FILE='+str(self.runtime/'status.json')+'"\n'
  def setup(self):
   if self.uid==0:raise RuntimeError('插件必须以当前 Steam 会话用户运行')
   pid,exe=self.compositor();runtime_hash=digest(exe) if exe else digest('/opt/steamvr/bin/linuxarm64/vrcompositor')
@@ -125,36 +139,70 @@ class Backend:
    except Exception:
     self.state=old
     if not old['enabled']:
-     try:self.sv(identity=True);self.remove_configuration()
+     try:
+      self.sv()
+      if not self.color['enabled']:self.remove_configuration()
      except Exception:pass
      if original is not None:
       try:self.hue(original)
       except Exception:pass
     raise
   else:
-   self.sv(identity=True);self.remove_configuration();self.state['enabled']=False;self.last_hue=None;self.save()
+   self.state['enabled']=False;self.sv();
+   if not self.color['enabled']:self.remove_configuration()
+   self.last_hue=None;self.save()
    if self.state['originalHue'] is not None and self.ready():self.hue(self.state['originalHue'])
   self.last_error=''
   return self.info()
  def tick(self):
-  if not self.state['enabled']:return
+  if not self.state['enabled'] and not self.color['enabled']:return
   try:
    self.sv()
    if not self.configured:self.setup()
-   if self.last_hue is None and self.ready():self.last_hue=self.hue(self.state['hue'])
+   if self.state['enabled'] and self.last_hue is None and self.ready():self.last_hue=self.hue(self.state['hue'])
    self.last_error=''
   except Exception as error:self.last_error=str(error)
+ def camera(self,mode=None):
+  if not self.ready():raise RuntimeError('SteamVR 会话尚未就绪')
+  _,exe=self.compositor()
+  if not exe or digest(exe) not in SUPPORTED or digest('/opt/steamvr/bin/linuxarm64/vrclient.so')!=CAMERA_API_HASH:raise RuntimeError('当前 SteamVR 相机模式接口尚未适配')
+  args=[str(self.helper()),'--mode-get'] if mode is None else [str(self.helper()),'--mode-set',mode]
+  result=json.loads(self.command(args).strip().splitlines()[-1])
+  if result.get('mode') not in ('off','color','mono') or not isinstance(result.get('colorAvailable'),bool):raise RuntimeError('相机模式响应无效')
+  return result
+ def set_mode(self,mode):
+  if mode not in ('off','color','mono'):raise ValueError('无效透视模式')
+  actual=self.camera(mode)
+  if actual['mode']!=mode:raise RuntimeError('系统未保持所选透视模式')
+  return self.info()
+ def color_set(self,params):
+  self.color={**self.color,**color_controls(params)}
+  if self.color['enabled']:self.sv()
+  self.save();return self.info()
+ def color_enable(self,enabled):
+  if not isinstance(enabled,bool):raise ValueError('enabled 必须是布尔值')
+  if enabled:self.setup()
+  self.color['enabled']=enabled;self.sv()
+  if not enabled and not self.state['enabled']:self.remove_configuration()
+  self.save();return self.info()
  def info(self):
   pid,exe=self.compositor();runtime_hash=digest(exe) if exe else None;native=None
   try:
    status=json.loads((self.runtime/'status.json').read_text())
    if status['pid']==pid and status.get('active') is True:native=status
   except (OSError,ValueError,KeyError):pass
-  return {'settings':self.state,'supported':runtime_hash in SUPPORTED if runtime_hash else None,'runtimeHash':runtime_hash,'nativeActive':bool(native),'matchedMono':native.get('matchedMono',0) if native else 0,'restartRequired':self.state['enabled'] and not native,'error':self.last_error,'connected':self.ready()}
+  camera={'mode':None,'colorAvailable':False};mode_error=''
+  try:camera=self.camera()
+  except Exception as error:mode_error=str(error)
+  return {**camera,'modeError':mode_error,'colorSettings':self.color,'colorNativeActive':bool(native and native.get('moduleVersion',0)>=2),'colorSaturationReady':bool(native and native.get('colorShaderMask',0)>0),'colorRestartRequired':self.color['enabled'] and not bool(native and native.get('moduleVersion',0)>=2),'settings':self.state,'supported':runtime_hash in SUPPORTED if runtime_hash else None,'runtimeHash':runtime_hash,'nativeActive':bool(native),'matchedMono':native.get('matchedMono',0) if native else 0,'restartRequired':self.state['enabled'] and not native,'error':self.last_error,'connected':self.ready()}
  def handle(self,method,params):
   if method=='framely.lifecycle.start':return {'ready':True}
   if method=='framely.lifecycle.stop':self.stop();return {'stopped':True}
   if method=='status':return self.info()
+  if method=='mode':return self.set_mode(params.get('mode'))
+  if method=='color.set':return self.color_set(params)
+  if method=='color.enable':return self.color_enable(params.get('enabled'))
+  if method=='color.reset':return self.color_set({k:COLOR_DEFAULT[k] for k in ('saturation','brightness','temperature')})
   if method=='readHue':return {'hue':self.hue()}
   if method=='set':return self.set(params)
   if method=='enable':return self.enable(params.get('enabled'))
