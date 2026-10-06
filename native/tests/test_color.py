@@ -62,6 +62,20 @@ if shader_dir:
   mock.mock_shader_failure(0)
   assert create(None,ctypes.byref(info),None,ctypes.byref(module))==0
   assert mock.mock_shader_size()==size.value and lib.frame_color_shader_mask()&kind and source.raw[:len(data)]==data
+  # Generator/debug metadata changes must not require a plugin update.
+  metadata=bytearray(data);struct.pack_into('<I',metadata,8,0x12345678)
+  name_words=[(4<<16)|5,struct.unpack_from('<I',data,12)[0]-1,0x74657374,0]
+  at=20
+  while struct.unpack_from('<I',metadata,at)[0]&65535!=71:at+=(struct.unpack_from('<I',metadata,at)[0]>>16)*4
+  metadata=metadata[:at]+struct.pack('<4I',*name_words)+metadata[at:]
+  pointer=patch(ctypes.create_string_buffer(bytes(metadata)),len(metadata),ctypes.byref(size),ctypes.byref(profile));assert pointer
+  out.write_bytes(ctypes.string_at(pointer,size.value));libc.free(pointer)
+  subprocess.run([os.getenv('SPIRV_VAL','spirv-val'),str(out)],check=True)
+  optimizer=Path(os.getenv('SPIRV_VAL','spirv-val')).with_name('spirv-opt')
+  if optimizer.exists():
+   compact=Path('build','compact.spv');subprocess.run([str(optimizer),'--compact-ids',str(Path(shader_dir,name)),'-o',str(compact)],check=True)
+   renumbered=compact.read_bytes();pointer=patch(ctypes.create_string_buffer(renumbered),len(renumbered),ctypes.byref(size),ctypes.byref(profile));assert pointer,'ID renumbering was rejected'
+   out.write_bytes(ctypes.string_at(pointer,size.value));libc.free(pointer);subprocess.run([os.getenv('SPIRV_VAL','spirv-val'),str(out)],check=True)
   mutated=bytearray(data);mutated[-1]^=1
   assert not patch(ctypes.create_string_buffer(bytes(mutated)),len(data),ctypes.byref(size),ctypes.byref(profile))
 print('PASS: 1000 color uniform snapshots, neutral identity, source/alpha preservation, invalid input and shader fingerprint guards')

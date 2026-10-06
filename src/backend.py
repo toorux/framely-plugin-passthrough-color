@@ -1,11 +1,9 @@
 #!/usr/bin/python3
 """Framely JSON-line backend; manages only this plugin's per-user integration."""
-import hashlib,json,math,os,pathlib,select,shlex,shutil,signal,subprocess,sys,tempfile,time
-SUPPORTED={'ab33d32b15f55d356d6c4509b635fac6dca9614e6485226e75b62aaaa3aa639e','d75d3a0d3a86f8750e8f77fd43575605465c8fa2bef973a7597c4a1c8cb123b3'}
+import ctypes,hashlib,json,math,os,pathlib,select,shlex,shutil,signal,subprocess,sys,tempfile,time
 MARKER='# Managed by tooru.passthrough-color\n'
 LEGACY_MARKER='# Managed by framely.passthrough-color\n'
 COLOR_DEFAULT={'enabled':False,'saturation':1.,'brightness':1.,'temperature':0.}
-CAMERA_API_HASH='05bece568cdfad1ecdd052a6f1aa0994ebddb6026db73c38b97eb031ea7e0c36'
 DEFAULT={'enabled':False,'hue':.67,'saturation':1.,'brightness':1.,'originalHue':None}
 
 def controls(params):
@@ -47,7 +45,7 @@ def digest(path):
 class Backend:
  def __init__(self,payload=None,data=None,home=None,uid=None):
   self.uid=os.getuid() if uid is None else uid;self.payload=pathlib.Path(payload or pathlib.Path(__file__).resolve().parent);self.data=pathlib.Path(data or os.environ['FRAMELY_DATA_DIR']);self.home=pathlib.Path(home or os.environ['HOME']);self.data.mkdir(parents=True,exist_ok=True)
-  self.runtime=pathlib.Path(f'/run/user/{self.uid}/framely-passthrough-color');self.cache=self.home/'.local/share/framely/passthrough-color';self.dropin=self.home/'.config/systemd/user/steamvr.service.d/80-framely-passthrough-color.conf';self.state=DEFAULT.copy();self.color=COLOR_DEFAULT.copy();self.last_error='';self.last_hue=None;self.configured=False
+  self.runtime=pathlib.Path(f'/run/user/{self.uid}/framely-passthrough-color');self.cache=self.home/'.local/share/framely/passthrough-color';self.dropin=self.home/'.config/systemd/user/steamvr.service.d/80-framely-passthrough-color.conf';self.state=DEFAULT.copy();self.color=COLOR_DEFAULT.copy();self.last_error='';self.last_hue=None;self.configured=False;self._render_cache=None;self._render_lib=None
   path=self.data/'settings.json'
   try:
    saved=json.loads(path.read_text());self.state.update(controls({k:saved[k] for k in ('hue','saturation','brightness') if k in saved}));self.state['enabled']=saved.get('enabled') is True
@@ -98,10 +96,19 @@ class Backend:
   parsed=json.loads(result.strip().splitlines()[-1]);return controls({'hue':parsed['hue']})['hue']
  def configuration(self):
   return MARKER+'[Service]\nEnvironment="VRCOMPOSITOR_LD_PRELOAD='+str(self.cache/'libframely_passthrough_color.so')+'"\nEnvironment="FRAME_SV_ENABLE=1"\nEnvironment="FRAME_SV_CONTROL_FILE='+str(self.runtime/'settings.json')+'"\nEnvironment="FRAME_COLOR_CONTROL_FILE='+str(self.runtime/'color.json')+'"\nEnvironment="FRAME_SV_STATUS_FILE='+str(self.runtime/'status.json')+'"\n'
+ def render_supported(self,path):
+  # Same bounded ELF/ABI probe as the startup module; hashes are diagnostic only.
+  try:
+   stamp=pathlib.Path(path).stat();key=(str(path),stamp.st_dev,stamp.st_ino,stamp.st_size,stamp.st_mtime_ns,stamp.st_ctime_ns)
+   if self._render_cache and self._render_cache[0]==key:return self._render_cache[1]
+   if self._render_lib is None:self._render_lib=ctypes.CDLL(str(self.payload/'libframely_passthrough_color.so'))
+   probe=self._render_lib.frame_sv_probe_file;probe.argtypes=[ctypes.c_char_p];probe.restype=ctypes.c_int
+   result=bool(probe(os.fsencode(path)));self._render_cache=(key,result);return result
+  except (OSError,AttributeError):return False
  def setup(self):
   if self.uid==0:raise RuntimeError('插件必须以当前 Steam 会话用户运行')
-  pid,exe=self.compositor();runtime_hash=digest(exe) if exe else digest('/opt/steamvr/bin/linuxarm64/vrcompositor')
-  if runtime_hash not in SUPPORTED:raise RuntimeError('当前 SteamVR 版本不受支持，未配置渲染模块')
+  pid,exe=self.compositor()
+  if not self.render_supported(exe or '/opt/steamvr/bin/linuxarm64/vrcompositor'):raise RuntimeError('未识别到兼容的透视渲染结构；模式切换仍可独立使用')
   if '"' in str(self.home) or '\n' in str(self.home):raise RuntimeError('不支持此 home 路径')
   if self.dropin.is_symlink():raise RuntimeError('已有 drop-in 为符号链接，未覆盖')
   if self.dropin.exists() and not self.dropin.read_text().startswith((MARKER,LEGACY_MARKER)):raise RuntimeError('同名 drop-in 不属于本插件，未覆盖')
@@ -133,7 +140,9 @@ class Backend:
   if enabled:
    old=self.state.copy();original=self.hue() if not old['enabled'] else old['originalHue']
    try:
-    self.setup();confirmed=self.hue(self.state['hue'])
+    _,exe=self.compositor()
+    if self.render_supported(exe or '/opt/steamvr/bin/linuxarm64/vrcompositor'):self.setup()
+    confirmed=self.hue(self.state['hue'])
     if abs(confirmed-self.state['hue'])>1e-5:raise RuntimeError('系统色相回读与设置不一致')
     self.state['originalHue']=original;self.state['enabled']=True;self.last_hue=confirmed;self.sv();self.save()
    except Exception:
@@ -158,14 +167,14 @@ class Backend:
   if not self.state['enabled'] and not self.color['enabled']:return
   try:
    self.sv()
-   if not self.configured:self.setup()
+   if not self.configured:
+    _,exe=self.compositor()
+    if self.render_supported(exe or '/opt/steamvr/bin/linuxarm64/vrcompositor'):self.setup()
    if self.state['enabled'] and self.last_hue is None and self.ready():self.last_hue=self.hue(self.state['hue'])
    self.last_error=''
   except Exception as error:self.last_error=str(error)
  def camera(self,mode=None):
   if not self.ready():raise RuntimeError('SteamVR 会话尚未就绪')
-  _,exe=self.compositor()
-  if not exe or digest(exe) not in SUPPORTED or digest('/opt/steamvr/bin/linuxarm64/vrclient.so')!=CAMERA_API_HASH:raise RuntimeError('当前 SteamVR 相机模式接口尚未适配')
   args=[str(self.helper()),'--mode-get'] if mode is None else [str(self.helper()),'--mode-set',mode]
   result=json.loads(self.command(args).strip().splitlines()[-1])
   if result.get('mode') not in ('off','color','mono') or not isinstance(result.get('colorAvailable'),bool):raise RuntimeError('相机模式响应无效')
@@ -194,7 +203,7 @@ class Backend:
   camera={'mode':None,'colorAvailable':False};mode_error=''
   try:camera=self.camera()
   except Exception as error:mode_error=str(error)
-  return {**camera,'modeError':mode_error,'colorSettings':self.color,'colorNativeActive':bool(native and native.get('moduleVersion',0)>=2),'colorSaturationReady':bool(native and native.get('colorShaderMask',0)>0),'colorRestartRequired':self.color['enabled'] and not bool(native and native.get('moduleVersion',0)>=2),'settings':self.state,'supported':runtime_hash in SUPPORTED if runtime_hash else None,'runtimeHash':runtime_hash,'nativeActive':bool(native),'matchedMono':native.get('matchedMono',0) if native else 0,'restartRequired':self.state['enabled'] and not native,'error':self.last_error,'connected':self.ready()}
+  return {**camera,'modeError':mode_error,'colorSettings':self.color,'colorNativeActive':bool(native and native.get('moduleVersion',0)>=2),'colorSaturationReady':bool(native and native.get('colorShaderMask',0)>0),'colorRestartRequired':self.color['enabled'] and not bool(native and native.get('moduleVersion',0)>=2),'settings':self.state,'supported':self.render_supported(exe) if exe else None,'runtimeHash':runtime_hash,'nativeActive':bool(native),'matchedMono':native.get('matchedMono',0) if native else 0,'restartRequired':self.state['enabled'] and not native and bool(exe and self.render_supported(exe)),'error':self.last_error,'connected':self.ready()}
  def handle(self,method,params):
   if method=='framely.lifecycle.start':return {'ready':True}
   if method=='framely.lifecycle.stop':self.stop();return {'stopped':True}

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include "frame_shader_structure.h"
 
 /* Only fingerprinted passthrough shaders are changed, in memory at creation.
  * Their vertex partners never read member 25 (verified fingerprints in README).
@@ -13,34 +14,54 @@ extern void frame_sv_hash_bytes(const void *,size_t,unsigned char[32]);
 static _Atomic unsigned enabled,shader_mask;
 void frame_color_shader_enable(void){atomic_store(&enabled,1);}
 unsigned frame_color_shader_mask(void){return atomic_load(&shader_mask);}
-static int equal_hash(const unsigned char hash[32],const char* hex){for(int i=0;i<32;i++){char b[3]={hex[i*2],hex[i*2+1],0};if(hash[i]!=(unsigned char)strtoul(b,0,16))return 0;}return 1;}
+static int shader_structure(const uint32_t* words,size_t count,uint32_t refs[10]){
+ if(words[3]<1||words[3]>8192)return 0;
+ uint32_t* map=calloc(words[3],4);uint32_t* reverse=calloc(words[3],4);uint32_t* normalized=malloc(count*4);
+ if(!map||!reverse||!normalized){free(map);free(reverse);free(normalized);return 0;}
+ size_t at=0;uint32_t next=0;int kind=0;
+ for(size_t i=5;i<count;){unsigned n=words[i]>>16,op=words[i]&65535;if(!n||n>count-i)goto done;
+  if(shader_metadata(op)){i+=n;continue;}
+  uint32_t mask;unsigned tail;if(!shader_ids(words+i,n,&mask,&tail))goto done;
+  memcpy(normalized+at,words+i,n*4);
+  for(unsigned j=1;j<n;j++)if((j<32&&(mask>>j&1))||(tail&&j>=tail)||(op==251&&j>=4&&!(j&1))){
+   uint32_t id=words[i+j];if(!id||id>=words[3])goto done;
+   if(!map[id]){if(next+1>=words[3])goto done;map[id]=++next;reverse[next]=id;}
+   normalized[at+j]=map[id];
+  }
+  at+=n;i+=n;
+ }
+ unsigned char digest[32];frame_sv_hash_bytes(normalized,at*4,digest);
+ const uint32_t* profile=0;
+ if(!memcmp(digest,shader_hash_0,32)){kind=1;profile=shader_refs_0;}
+ else if(!memcmp(digest,shader_hash_1,32)){kind=2;profile=shader_refs_1;}
+ if(profile)for(unsigned j=0;j<10;j++){if(profile[j]>next){kind=0;break;}refs[j]=reverse[profile[j]];}
+ done:free(map);free(reverse);free(normalized);return kind;
+}
 
 /* Returns owned words, or NULL to preserve the original module. */
 uint32_t *frame_color_patch(const uint32_t* words,size_t bytes,size_t* result_bytes,unsigned* kind){
  if(!words||bytes<20||bytes%4||bytes>20000||words[0]!=0x07230203)return 0;
- unsigned char hash[32];frame_sv_hash_bytes(words,bytes,hash);
- int sharp=equal_hash(hash,"5ef0a90f1cd68f692e426dcb26369dae44dc1b96b71ca633247cc95b0e97e06f");
- if(!sharp&&!equal_hash(hash,"07d34d631e4609d4289c402c1fe9d37bbc662f7201bad098d3ad0918c4c9bc97"))return 0;
- uint32_t bound=words[3],ptr=sharp?150:125,ubo=sharp?108:83,index25=sharp?110:85,index0=sharp?111:86,index3=sharp?130:105;
- uint32_t pixel=sharp?970:325,result=sharp?989:344;size_t function=0,target=0,count=bytes/4;
+ uint32_t refs[10];int profile=shader_structure(words,bytes/4,refs);if(!profile)return 0;
+ uint32_t scalar=refs[0],vector=refs[1],ptr=refs[2],ubo=refs[3],index25=refs[4],index0=refs[5],index3=refs[6];
+ uint32_t pixel=refs[7],result=refs[8],glsl=refs[9],bound=words[3];size_t function=0,target=0,count=bytes/4;
  for(size_t i=5;i<count;){unsigned n=words[i]>>16,op=words[i]&65535;if(!n||n>count-i)return 0;if(op==54&&!function)function=i;if(op==133&&n==5&&words[i+2]==result&&words[i+3]==pixel)target=i;i+=n;}
  if(!function||!target||bound>UINT32_MAX-11)return 0;
  float w[]={.2126f,.7152f,.0722f};uint32_t bits[3];memcpy(bits,w,sizeof(bits));
- uint32_t constants[]={ (4u<<16)|43,6,bound,bits[0],(4u<<16)|43,6,bound+1,bits[1],(4u<<16)|43,6,bound+2,bits[2],(6u<<16)|44,14,bound+3,bound,bound+1,bound+2 };
+ uint32_t constants[]={ (4u<<16)|43,scalar,bound,bits[0],(4u<<16)|43,scalar,bound+1,bits[1],(4u<<16)|43,scalar,bound+2,bits[2],(6u<<16)|44,vector,bound+3,bound,bound+1,bound+2 };
  uint32_t code[]={
   (7u<<16)|65,ptr,bound+4,ubo,index25,index0,index3,
-  (4u<<16)|61,6,bound+5,bound+4,
-  (5u<<16)|148,6,bound+6,pixel,bound+3,
-  (6u<<16)|80,14,bound+7,bound+6,bound+6,bound+6,
-  (6u<<16)|80,14,bound+8,bound+5,bound+5,bound+5,
+  (4u<<16)|61,scalar,bound+5,bound+4,
+  (5u<<16)|148,scalar,bound+6,pixel,bound+3,
+  (6u<<16)|80,vector,bound+7,bound+6,bound+6,bound+6,
+  (6u<<16)|80,vector,bound+8,bound+5,bound+5,bound+5,
   /* GLSL.std.450 FMix in linear RGB: grey*(1-S) + RGB*S. */
-  (8u<<16)|12,14,bound+9,1,46,bound+7,pixel,bound+8
+  (8u<<16)|12,vector,bound+9,glsl,46,bound+7,pixel,bound+8
  };
  size_t extra=sizeof(constants)+sizeof(code);uint32_t* out=malloc(bytes+extra);if(!out)return 0;
  memcpy(out,words,function*4);size_t at=function;memcpy(out+at,constants,sizeof(constants));at+=sizeof(constants)/4;
  memcpy(out+at,words+function,(target-function)*4);at+=target-function;memcpy(out+at,code,sizeof(code));at+=sizeof(code)/4;
  memcpy(out+at,words+target,(count-target)*4);out[at+3]=bound+9;out[3]=bound+10;
- *result_bytes=bytes+extra;*kind=sharp?2:1;return out;
+ *result_bytes=bytes+extra;*kind=(unsigned)profile;return out;
 }
 
 /* Vulkan's dispatchable handles are pointers on Linux ARM64. */

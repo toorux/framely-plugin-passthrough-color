@@ -15,6 +15,8 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include "frame_compat.h"
+#include "frame_shapes.h"
 
 /* Framely startup module. Constructor is opt-in; never attaches to a process.
  * No OpenVR calls, camera access, UI writes, GPU capture or disk binary patch.
@@ -189,7 +191,7 @@ void frame_sv_hash_bytes(const void *data,size_t size,unsigned char out[32]) {
  sha_block(h,buf);
  for(unsigned i=0;i<8;i++)for(unsigned j=0;j<4;j++)out[i*4+j]=(unsigned char)(h[i]>>(24-j*8));
 }
-__attribute__((noinline)) static int hash_fd(int fd,unsigned char out[32]) {
+__attribute__((noinline)) static __attribute__((unused)) int hash_fd(int fd,unsigned char out[32]) {
     uint32_t h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
     unsigned char buf[64]; size_t used=0; uint64_t total=0;
     for (;;) {
@@ -207,17 +209,18 @@ __attribute__((noinline)) static int hash_fd(int fd,unsigned char out[32]) {
     for(unsigned i=0;i<8;++i) for(unsigned j=0;j<4;++j) out[4*i+j]=(unsigned char)(h[i]>>(24-8*j));
     return 1;
 }
-typedef struct { unsigned char hash[32];uintptr_t context,site,upload,vtable; } Profile;
-static const Profile profiles[]={
- { {0xab,0x33,0xd3,0x2b,0x15,0xf5,0x5d,0x35,0x6d,0x6c,0x45,0x09,0xb6,0x35,0xfa,0xc6,0xdc,0xa9,0x61,0x4e,0x64,0x85,0x22,0x6e,0x75,0xb6,0x2a,0xaa,0xa3,0xaa,0x63,0x9e},0x167ab0,0x167ad4,0x2a27c0,0x5aab10 },
- { {0xd7,0x5d,0x3a,0x0d,0x3a,0x86,0xf8,0x75,0x0e,0x8f,0x77,0xfd,0x43,0x57,0x56,0x05,0x46,0x5c,0x8f,0xa2,0xbe,0xf9,0x73,0xa7,0x59,0x7c,0x4a,0x1c,0x8c,0xb1,0x23,0xb3},0x166d48,0x166d6c,0x2a1af8,0x5a7b10 }
-};
-static const Profile *profile_for(const unsigned char *hash){for(size_t i=0;i<sizeof(profiles)/sizeof(profiles[0]);++i)if(!memcmp(hash,profiles[i].hash,32))return &profiles[i];return 0;}
 static const unsigned char upload_context[]={0xe0,0xbb,0x40,0xbd,0x62,0x03,0x03,0x91,0xe1,0x43,0x41,0xbd,0x60,0x07,0x40,0xf9,0x08,0x08,0x21,0x1e,0x61,0x6b,0x41,0xf9,0x68,0xff,0x01,0xbd,0x07,0x00,0x40,0xf9,0xe7,0x3c,0x40,0xf9,0xe0,0x00,0x3f,0xd6};
 static int match_context(const void *memory) { return !memcmp(memory,upload_context,sizeof(upload_context)); }
-static int main_base(struct dl_phdr_info *info,size_t size,void *out) {
-    (void)size; if (info->dlpi_name&&*info->dlpi_name) return 0;
-    *(uintptr_t *)out=info->dlpi_addr; return 1;
+typedef struct {uintptr_t base;const FrameProfile* profile;int valid;} MainImage;
+static int image_range(const struct dl_phdr_info* image,uintptr_t at,size_t bytes,unsigned flags){
+ for(unsigned j=0;j<image->dlpi_phnum;j++){const ElfW(Phdr)* p=image->dlpi_phdr+j;
+  if(p->p_type==PT_LOAD&&(p->p_flags&flags)==flags&&at>=p->p_vaddr&&at-p->p_vaddr<=p->p_memsz&&bytes<=p->p_memsz-(at-p->p_vaddr))return 1;
+ }return 0;
+}
+static int main_image(struct dl_phdr_info *info,size_t size,void *out) {
+ (void)size;if(info->dlpi_name&&*info->dlpi_name)return 0;
+ MainImage* image=out;image->base=info->dlpi_addr;const FrameProfile* p=image->profile;
+ image->valid=image_range(info,p->context,256,PF_R|PF_X)&&image_range(info,p->upload,sizeof(upload_shape),PF_R|PF_X)&&image_range(info,p->vtable,128,PF_R);return 1;
 }
 static void *make_veneer(uintptr_t site,size_t page) {
     uintptr_t anchor=site&~(uintptr_t)(page-1);
@@ -256,13 +259,10 @@ __attribute__((constructor)) static void initialize(void) {
     executable[n]=0;
     const char *name=strrchr(executable,'/');
     if(!name||strcmp(name+1,"vrcompositor")) return;
-    int fd=open("/proc/self/exe",O_RDONLY|O_CLOEXEC); unsigned char digest[32];
-    if(fd<0) return;
-    int valid=hash_fd(fd,digest); close(fd);
-    const Profile *profile=valid?profile_for(digest):0;
-    if(!profile) { fputs("frame-sv: executable hash rejected; inactive\n",stderr);return; }
-    uintptr_t base=0; dl_iterate_phdr(main_base,&base);
-    if(!base||!match_context((void *)(base+profile->context))||*(uintptr_t *)(base+profile->vtable+120)!=base+profile->upload) { fputs("frame-sv: instruction/vtable rejected; inactive\n",stderr);return; }
+    FrameProfile resolved;const FrameProfile* profile=&resolved;
+    if(!frame_find_profile("/proc/self/exe",&resolved)){fputs("frame-sv: upload structure unavailable; inactive\n",stderr);return;}
+    MainImage image={0,profile,0};dl_iterate_phdr(main_image,&image);uintptr_t base=image.base;
+    if(!image.valid||!base||!frame_shape((void*)(base+profile->upload),upload_shape,sizeof(upload_shape)/4)||!match_context((void *)(base+profile->context))||*(uintptr_t *)(base+profile->vtable+120)!=base+profile->upload) { fputs("frame-sv: instruction/vtable rejected; inactive\n",stderr);return; }
     const char *path=getenv("FRAME_SV_CONTROL_FILE");if(!path||path[0]!='/'||strlen(path)>4000){fputs("frame-sv: control path missing; inactive\n",stderr);return;}control_file=path;
     long page=sysconf(_SC_PAGESIZE); if(page<=0) return;
     void *veneer=make_veneer(base+profile->site,(size_t)page); if(!veneer) return;
@@ -281,7 +281,7 @@ void frame_sv_test_publish(float s,float v) { atomic_store(&cached,pack(s,v)); }
 int frame_sv_test_parse(const char *s,uint64_t *out) { return parse_control(s,out); }
 int frame_color_test_parse(const char *s,uint64_t *out) { return parse_control_ex(s,out,1); }
 int frame_sv_test_hash(const char *path,unsigned char *out) { int fd=open(path,O_RDONLY);if(fd<0)return 0;int ok=hash_fd(fd,out);close(fd);return ok; }
-int frame_sv_test_accept_file(const char *path) { unsigned char digest[32];int fd=open(path,O_RDONLY);if(fd<0)return 0;int ok=hash_fd(fd,digest);close(fd);return ok&&profile_for(digest)!=0; }
+int frame_sv_test_accept_file(const char *path) { return frame_sv_probe_file(path); }
 int frame_sv_test_context(const void *data) { return match_context(data); }
 int frame_sv_test_reader(const char *path) { control_file=path;return start_reader(); }
 void frame_sv_test_stop(void) { stop_reader(); }

@@ -9,6 +9,21 @@ class Color(unittest.TestCase):
   self.b.ready=lambda:True;self.b.compositor=lambda:(None,None)
   self.mode='off';self.b.camera=lambda mode=None:{'mode':self.mode,'colorAvailable':True}
  def tearDown(self):self.tmp.cleanup()
+ def test_mode_does_not_read_compositor_or_client_hash(self):
+  self.b.camera=module.Backend.camera.__get__(self.b)
+  self.b.helper=lambda:pathlib.Path('/helper')
+  self.b.command=lambda _:json.dumps({'mode':'color','colorAvailable':True})
+  with patch.object(module,'digest',side_effect=AssertionError('global hash gate')):
+   self.assertEqual(self.b.camera()['mode'],'color')
+ def test_hue_survives_incompatible_native_renderer(self):
+  with patch.object(self.b,'render_supported',return_value=False),patch.object(self.b,'setup') as setup,patch.object(self.b,'hue',side_effect=lambda v=None:.42 if v is None else v):
+   self.b.enable(True);self.b.set({'hue':.3});self.b.tick();setup.assert_not_called()
+   self.assertEqual(self.b.state['hue'],.3);self.assertTrue(self.b.state['enabled']);self.assertEqual(self.b.last_error,'')
+ def test_mode_failure_does_not_change_render_capability(self):
+  self.b.camera=lambda *args:(_ for _ in ()).throw(RuntimeError('mode ABI changed'))
+  self.b.compositor=lambda:(123,pathlib.Path('/unlisted/compositor'))
+  with patch.object(module,'digest',return_value='unlisted'),patch.object(self.b,'render_supported',return_value=True):
+   status=self.b.info();self.assertTrue(status['supported']);self.assertIsNone(status['mode']);self.assertEqual(status['modeError'],'mode ABI changed')
  def test_color_ranges_and_invalid_fields(self):
   for params in [{'temperature':-1.1},{'temperature':float('nan')},{'saturation':2.1},{'brightness':True},{'hue':.4},{'enabled':True}]:
    with self.assertRaises(ValueError):module.color_controls(params)

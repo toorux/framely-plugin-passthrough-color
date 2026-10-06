@@ -38,7 +38,7 @@ class Backend(unittest.TestCase):
   with self.assertRaises(RuntimeError):self.backend.remove_configuration()
   self.assertEqual(self.backend.dropin.read_text(),'foreign config')
   self.backend.dropin.unlink();self.backend.command=lambda _: 'VRCOMPOSITOR_LD_PRELOAD=/other/plugin.so'
-  with patch.object(module,'digest',return_value=next(iter(module.SUPPORTED))):
+  with patch.object(self.backend,'render_supported',return_value=True):
    with self.assertRaises(RuntimeError):self.backend.setup()
   self.assertFalse(self.backend.dropin.exists())
  def test_failed_hue_readback_does_not_save_new_controls(self):
@@ -46,7 +46,7 @@ class Backend(unittest.TestCase):
   with self.assertRaises(RuntimeError):self.backend.set({'hue':.1})
   self.assertEqual(self.backend.state['hue'],.67)
  def test_unsupported_runtime_is_rejected_before_configuration(self):
-  with patch.object(module,'digest',return_value='0'*64):
+  with patch.object(self.backend,'render_supported',return_value=False):
    with self.assertRaises(RuntimeError):self.backend.setup()
   self.assertFalse(self.backend.dropin.exists())
  def test_lifecycle_start_and_stop_use_existing_cleanup(self):

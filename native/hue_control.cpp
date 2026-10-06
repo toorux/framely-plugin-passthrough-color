@@ -10,6 +10,10 @@
 #include <unistd.h>
 #include <filesystem>
 #include <fstream>
+#include <link.h>
+#include "frame_shapes.h"
+struct CodeRange {uintptr_t base,address;size_t size;bool found;};
+static int executable_range(dl_phdr_info* info,size_t,void* opaque){auto& q=*static_cast<CodeRange*>(opaque);if(info->dlpi_addr!=q.base)return 0;for(int i=0;i<info->dlpi_phnum;i++){auto& p=info->dlpi_phdr[i];uintptr_t start=info->dlpi_addr+p.p_vaddr;if(p.p_type==PT_LOAD&&(p.p_flags&PF_X)&&q.address>=start&&q.address-start<=p.p_memsz&&q.size<=p.p_memsz-(q.address-start)){q.found=true;return 1;}}return 0;}
 static bool rgb_available(){
  std::error_code error;auto nodes=std::filesystem::directory_iterator("/sys/class/video4linux",error);if(error)return false;
  for(const auto& node:nodes){
@@ -25,9 +29,16 @@ static int mode(const char* requested){
  vr::EVRInitError e{};void* instance=vr::VR_GetGenericInterface("IVRCameraPassthroughInternal_001",&e);
  if(!instance||e){std::fprintf(stderr,"相机模式接口不可用\n");return 6;}
  auto** methods=*reinterpret_cast<void***>(instance);
- // Private ABI verified against vrclient SHA256 05bece56...7e0c36.
- const uintptr_t offsets[]={0x1a8218,0x1a8680,0x1a8520,0x1a8740};
- for(int j=0;j<4;j++){Dl_info d{};if(!dladdr(methods[j+7],&d)||(uintptr_t)methods[j+7]-(uintptr_t)d.dli_fbase!=offsets[j]){std::fprintf(stderr,"相机模式接口版本不匹配\n");return 6;}}
+ // Validate method bodies and their five-byte layout, independent of load offsets.
+ const uint32_t* shapes[]={visible_shape,show_shape,get_shape,set_shape};
+ const size_t sizes[]={sizeof(visible_shape),sizeof(show_shape),sizeof(get_shape),sizeof(set_shape)};
+ uintptr_t owner=0;
+ for(int j=0;j<4;j++){
+  Dl_info d{};if(!dladdr(methods[j+7],&d)){std::fprintf(stderr,"相机模式方法不可用\n");return 6;}
+  if(!j)owner=(uintptr_t)d.dli_fbase;
+  CodeRange q{owner,(uintptr_t)methods[j+7],sizes[j],false};dl_iterate_phdr(executable_range,&q);
+  if((uintptr_t)d.dli_fbase!=owner||!q.found||!frame_shape(methods[j+7],shapes[j],sizes[j]/4)){std::fprintf(stderr,"相机模式接口结构不兼容；不影响独立调色功能\n");return 6;}
+ }
  using Visible=int(*)(void*,bool*);using Show=void(*)(void*,bool);
  using Get=bool(*)(void*,uint8_t*);using Set=void(*)(void*,const uint8_t*);
  auto get=reinterpret_cast<Get>(methods[9]);auto read=reinterpret_cast<Visible>(methods[7]);

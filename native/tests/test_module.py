@@ -29,6 +29,27 @@ with tempfile.TemporaryDirectory(dir=root,prefix='.frame-sv-test-') as temporary
         assert lib.frame_sv_test_hash(os.fsencode(compositor),out)
         assert bytes(out).hex() in {'ab33d32b15f55d356d6c4509b635fac6dca9614e6485226e75b62aaaa3aa639e','d75d3a0d3a86f8750e8f77fd43575605465c8fa2bef973a7597c4a1c8cb123b3'}
         assert lib.frame_sv_test_accept_file(os.fsencode(compositor))
+        data=Path(compositor).read_bytes()
+        # A changed build ID/content outside the ABI must still be accepted.
+        harmless=bytearray(data);harmless[0x2a0]^=1
+        changed=work/'updated-compositor';changed.write_bytes(harmless)
+        assert lib.frame_sv_test_accept_file(os.fsencode(changed))
+        # The function may move: relocate its address and relocation addend.
+        moved=bytearray(data);eh=struct.unpack_from('<16sHHIQQQIHHHHHH',data)
+        shoff,shentsize,shnum=eh[6],eh[11],eh[12]
+        for index in range(shnum):
+            at=shoff+index*shentsize;section=struct.unpack_from('<IIQQQQIIQQ',data,at)
+            if section[1]==1 and section[2]&4:struct.pack_into('<Q',moved,at+16,section[3]+0x2000)
+            if section[1]==4:
+                for at2 in range(section[4],section[4]+section[5],24):
+                    addend=struct.unpack_from('<q',data,at2+16)[0]
+                    if addend==0x2a1af8:struct.pack_into('<q',moved,at2+16,addend+0x2000)
+        changed.write_bytes(moved);assert lib.frame_sv_test_accept_file(os.fsencode(changed))
+        for offset in [0x166d4c,0x166dec,0x2a1b30]:
+            incompatible=bytearray(data);incompatible[offset]^=1;changed.write_bytes(incompatible)
+            assert not lib.frame_sv_test_accept_file(os.fsencode(changed)),hex(offset)
+        for malformed in [data[:64],b'not ELF']:
+            changed.write_bytes(malformed);assert not lib.frame_sv_test_accept_file(os.fsencode(changed))
     else:
         print('SKIP installed-binary acceptance: set FRAME_TEST_COMPOSITOR to an existing read-only vrcompositor copy')
     assert not lib.frame_sv_test_accept_file(os.fsencode(work/'hash-input'))
@@ -74,9 +95,9 @@ with tempfile.TemporaryDirectory(dir=root,prefix='.frame-sv-test-') as temporary
     env=dict(os.environ,FRAME_SV_ENABLE='1')
     env['LD_LIBRARY_PATH']=str(root/'build')+(':'+env['LD_LIBRARY_PATH'] if env.get('LD_LIBRARY_PATH') else '')
     result=subprocess.run([str(mock)],capture_output=True,text=True,env=env,check=True)
-    assert 'executable hash rejected; inactive' in result.stderr
+    assert 'upload structure unavailable; inactive' in result.stderr
 
-print(json.dumps({'status':'PASS','tests':['SHA256 vectors/boundaries and installed binary copy; constructor expected digest positive/negative acceptance',
+print(json.dumps({'status':'PASS','tests':['SHA256 vectors/boundaries and installed binary copy; constructor structure positive/negative acceptance',
     'all 40 upload signature bytes reject mutation','strict JSON malformed/nonfinite/range/duplicate rejection',
     'background-only live cache updates','missing/partial/oversized/NUL/symlink/FIFO control resets to identity',
     'mock executable constructor fails closed before hook'],
